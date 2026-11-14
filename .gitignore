@@ -1,0 +1,15 @@
+# internal working files — never commit
+IDEA.md
+notes.md
+
+# rust
+/target
+Cargo.lock.bak
+**/*.rs.bk
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
