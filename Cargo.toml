@@ -13,7 +13,7 @@ readme = "README.md"
 # README references assets/icon.png through an absolute raw.githubusercontent
 # URL (relative paths do not render on crates.io), so the 1.7 MB icon stays out
 # of the published package
-exclude = ["IDEA.md", "notes.md", ".github/", "assets/"]
+exclude = ["IDEA.md", "notes.md", ".github/", "assets/", ".gitignore"]
 autobenches = false
 
 [features]
