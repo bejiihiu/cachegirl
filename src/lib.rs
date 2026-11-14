@@ -89,7 +89,10 @@ pub use policy::{
     CleanupContext, CleanupPolicy, CleanupPolicyBuilder, CleanupScope, CustomCleanupPolicy,
     PolicyDecision, Priority, Quota, Ttl,
 };
-pub use recovery::{RecoveryManager, RecoveryPolicy, RecoveryReport};
+pub use recovery::{
+    DEFAULT_STALE_INSTANCE_AFTER, RecoveryAction, RecoveryEntry, RecoveryManager, RecoveryPolicy,
+    RecoveryReport,
+};
 #[cfg(feature = "cache")]
 pub use resource::CacheEntryResource;
 #[cfg(feature = "memory")]

@@ -17,7 +17,7 @@ use crate::observability::{EventSink, NullSink, Statistics, StatisticsCollector}
 use crate::policy::CleanupPolicy;
 #[cfg(feature = "filesystem")]
 use crate::recovery::RecoveryManager;
-use crate::recovery::RecoveryPolicy;
+use crate::recovery::{RecoveryPolicy, RecoveryReport};
 
 /// How the filesystem backend treats symbolic links.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -55,6 +55,8 @@ pub struct ManagerConfig {
     pub instance_id: String,
     /// How crash recovery behaves on startup.
     pub recovery_policy: RecoveryPolicy,
+    /// How old a directory without a lock file must be before recovery treats it as stale.
+    pub stale_instance_after: Duration,
 }
 
 impl ManagerConfig {
@@ -88,6 +90,7 @@ pub struct TempManager {
     closed: Arc<AtomicBool>,
     counters: Arc<StatisticsCollector>,
     shared: Arc<NamespaceShared>,
+    recovery_report: Option<RecoveryReport>,
 }
 
 impl TempManager {
@@ -114,6 +117,13 @@ impl TempManager {
     /// Read-only view of the validated configuration.
     pub fn config(&self) -> &ManagerConfig {
         &self.config
+    }
+
+    /// Report from the startup recovery pass, when `cleanup_on_start` was
+    /// enabled. `None` otherwise, and always `None` without the
+    /// `filesystem` feature.
+    pub fn recovery_report(&self) -> Option<&RecoveryReport> {
+        self.recovery_report.as_ref()
     }
 
     /// Shared registry of all managed resources.
@@ -306,6 +316,7 @@ pub struct TempManagerBuilder {
     symlink_policy: SymlinkPolicy,
     instance_id: Option<String>,
     recovery_policy: RecoveryPolicy,
+    stale_instance_after: Duration,
     event_sink: Arc<dyn EventSink>,
     cleanup_policy: Option<CleanupPolicy>,
     custom_cleanup_policy: Option<Arc<dyn crate::policy::CustomCleanupPolicy>>,
@@ -324,6 +335,7 @@ impl Default for TempManagerBuilder {
             symlink_policy: SymlinkPolicy::default(),
             instance_id: None,
             recovery_policy: RecoveryPolicy::default(),
+            stale_instance_after: crate::recovery::DEFAULT_STALE_INSTANCE_AFTER,
             event_sink: Arc::new(NullSink),
             cleanup_policy: None,
             custom_cleanup_policy: None,
@@ -387,8 +399,21 @@ impl TempManagerBuilder {
     }
 
     /// How stale instance data from crashed runs is reclaimed.
+    ///
+    /// [`RecoveryPolicy::OnStartup`] (the default) deletes what recovery
+    /// judges certainly stale, [`RecoveryPolicy::ReportOnly`] only produces
+    /// a report, and [`RecoveryPolicy::Never`] skips recovery entirely.
+    /// Recovery never aborts startup: problems are emitted through the
+    /// event sink and visible in [`TempManager::recovery_report`].
     pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
         self.recovery_policy = policy;
+        self
+    }
+
+    /// How old a directory without a lock file must be before recovery
+    /// treats it as stale. Default: 1 hour.
+    pub fn stale_instance_after(mut self, threshold: Duration) -> Self {
+        self.stale_instance_after = threshold;
         self
     }
 
@@ -451,6 +476,7 @@ impl TempManagerBuilder {
             symlink_policy: self.symlink_policy,
             instance_id,
             recovery_policy: self.recovery_policy,
+            stale_instance_after: self.stale_instance_after,
         };
         config.validate()?;
 
@@ -472,11 +498,34 @@ impl TempManagerBuilder {
             })?;
         let config = ManagerConfig { root, ..config };
 
+        let recovery_report: Option<RecoveryReport>;
         #[cfg(feature = "filesystem")]
         {
-            let recovery = RecoveryManager::new(&config.root);
+            let recovery =
+                RecoveryManager::new(&config.root).with_stale_after(config.stale_instance_after);
             if config.cleanup_on_start {
-                recovery.recover(config.recovery_policy, &config.instance_id)?;
+                // recovery must never take the manager down: errors are
+                // surfaced through the report and the event sink instead
+                let report = match recovery.recover(config.recovery_policy, &config.instance_id) {
+                    Ok(report) => report,
+                    Err(e) => RecoveryReport {
+                        failed: 1,
+                        failure_reasons: vec![e.to_string()],
+                        ..RecoveryReport::default()
+                    },
+                };
+                self.event_sink
+                    .emit(&crate::observability::Event::RecoveryCompleted {
+                        instance: config.instance_id.clone(),
+                        scanned: report.scanned,
+                        removed: report.removed,
+                        kept: report.kept,
+                        failed: report.failed,
+                        bytes_freed: report.bytes_freed,
+                    });
+                recovery_report = Some(report);
+            } else {
+                recovery_report = None;
             }
             recovery
                 .write_lock(&config.instance_id)
@@ -508,6 +557,11 @@ impl TempManagerBuilder {
             custom_cleanup_policy: std::sync::RwLock::new(self.custom_cleanup_policy),
         });
 
+        #[cfg(not(feature = "filesystem"))]
+        {
+            recovery_report = None;
+        }
+
         Ok(TempManager {
             config,
             registry,
@@ -515,6 +569,7 @@ impl TempManagerBuilder {
             closed,
             counters,
             shared,
+            recovery_report,
         })
     }
 }
@@ -573,5 +628,147 @@ mod tests {
             .unwrap();
         let report = manager.shutdown().unwrap();
         assert_eq!(report.scanned, 0);
+    }
+
+    #[cfg(feature = "filesystem")]
+    fn plant_dead_instance(root: &std::path::Path, name: &str) {
+        let dead = root.join(name);
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::write(
+            dead.join(".cachegirl.lock"),
+            format!("version=2\npid=2147483646\ncreated=1763100000\ninstance={name}\n"),
+        )
+        .unwrap();
+        std::fs::write(dead.join("data.bin"), vec![b'x'; 512]).unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn cleanup_on_start_reclaims_dead_instance_and_keeps_report() {
+        let dir = crate::testsupport::TestDir::new();
+        plant_dead_instance(dir.path(), "instance-crashed");
+
+        let manager = TempManager::builder()
+            .root(dir.path())
+            .instance_id("instance-fresh")
+            .cleanup_on_start(true)
+            .build()
+            .unwrap();
+        let report = manager
+            .recovery_report()
+            .expect("cleanup_on_start must produce a report");
+        assert_eq!(report.removed, 1, "{report}");
+        assert!(report.bytes_freed >= 512);
+        assert!(!dir.path().join("instance-crashed").exists());
+        assert!(
+            dir.path()
+                .join("instance-fresh")
+                .join(".cachegirl.lock")
+                .exists()
+        );
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn report_only_policy_builds_and_deletes_nothing() {
+        let dir = crate::testsupport::TestDir::new();
+        plant_dead_instance(dir.path(), "instance-crashed");
+
+        let manager = TempManager::builder()
+            .root(dir.path())
+            .instance_id("instance-fresh")
+            .cleanup_on_start(true)
+            .recovery_policy(crate::recovery::RecoveryPolicy::ReportOnly)
+            .build()
+            .unwrap();
+        let report = manager.recovery_report().unwrap();
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(dir.path().join("instance-crashed").exists());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn pid_reuse_does_not_fool_startup_recovery() {
+        let dir = crate::testsupport::TestDir::new();
+        // the lock names our pid (alive) with a lifetime token from another era:
+        // that pid belongs to a different process now, so the instance is stale
+        let dead = dir.path().join("instance-reused");
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::write(
+            dead.join(".cachegirl.lock"),
+            format!(
+                "version=2\npid={}\ncreated=1763100000\ninstance=instance-reused\nstart=somebody-elses-lifetime\n",
+                std::process::id()
+            ),
+        )
+        .unwrap();
+
+        let manager = TempManager::builder()
+            .root(dir.path())
+            .instance_id("instance-fresh")
+            .cleanup_on_start(true)
+            .build()
+            .unwrap();
+        let report = manager.recovery_report().unwrap();
+        assert_eq!(report.removed, 1, "{report}");
+        assert!(!dead.exists());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn stale_directory_without_lock_needs_age() {
+        let dir = crate::testsupport::TestDir::new();
+        std::fs::create_dir_all(dir.path().join("instance-no-lock")).unwrap();
+
+        let manager = TempManager::builder()
+            .root(dir.path())
+            .instance_id("instance-fresh")
+            .cleanup_on_start(true)
+            .stale_instance_after(Duration::from_secs(3600))
+            .build()
+            .unwrap();
+        let report = manager.recovery_report().unwrap();
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(dir.path().join("instance-no-lock").exists());
+
+        // backdating via a custom manager on the same root with a zero threshold;
+        // the fresh instance keeps its own directory (current instance is sacred),
+        // only the lock-less ghost is reclaimed
+        manager.shutdown().unwrap();
+        let manager = TempManager::builder()
+            .root(dir.path())
+            .instance_id("instance-fresh")
+            .cleanup_on_start(true)
+            .stale_instance_after(Duration::from_secs(0))
+            .build()
+            .unwrap();
+        let report = manager.recovery_report().unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!dir.path().join("instance-no-lock").exists());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn startup_recovery_never_fails_the_build() {
+        // the recovery root exists, but the stale entry's directory was
+        // already removed between scan and use; the build must still succeed
+        let dir = crate::testsupport::TestDir::new();
+        let manager = TempManager::builder()
+            .root(dir.path())
+            .instance_id("instance-fresh")
+            .cleanup_on_start(true)
+            .build()
+            .unwrap();
+        // a fresh build over a root with no stale candidates succeeds with an
+        // empty report
+        let report = manager.recovery_report().unwrap();
+        assert_eq!(report.failed, 0);
+        manager.shutdown().unwrap();
     }
 }

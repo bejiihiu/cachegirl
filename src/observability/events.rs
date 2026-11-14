@@ -54,6 +54,10 @@ pub enum Event {
         removed: u64,
         /// Directories kept.
         kept: u64,
+        /// Directories that could not be reclaimed.
+        failed: u64,
+        /// Bytes freed by reclamation.
+        bytes_freed: u64,
     },
 }
 
@@ -154,8 +158,10 @@ impl EventSink for TracingSink {
                 scanned,
                 removed,
                 kept,
+                failed,
+                bytes_freed,
             } => {
-                tracing::debug!(%instance, scanned, removed, kept, "recovery completed");
+                tracing::debug!(%instance, scanned, removed, kept, failed, bytes_freed, "recovery completed");
             }
         }
     }

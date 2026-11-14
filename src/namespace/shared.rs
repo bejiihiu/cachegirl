@@ -122,6 +122,7 @@ pub(crate) fn test_shared(root: &std::path::Path) -> Arc<NamespaceShared> {
         symlink_policy: SymlinkPolicy::Reject,
         instance_id: "instance-test".to_string(),
         recovery_policy: RecoveryPolicy::default(),
+        stale_instance_after: Duration::from_secs(3600),
     };
     let registry = Arc::new(Registry::new());
     #[cfg(feature = "filesystem")]
