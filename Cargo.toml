@@ -41,6 +41,12 @@ serde_json = "1"
 # windows-gnu has no dlltool, so no `ansi` feature (pulls nu-ansi-term → windows-sys);
 # fmt works fine without colors, just monochrome output
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry"] }
+# windows-gnu has no dlltool, so proptest runs with default features off:
+# `std` would pull rand/os_rng → getrandom, `fork` would pull tempfile and
+# friends — all unbuildable here. ChaCha-based generation needs none of them.
+# no fork means a panicking case aborts the runner instead of printing a
+# shrinked report, which is fine (it never goes green silently).
+proptest = { version = "1.11.0", default-features = false, features = ["alloc", "no_std", "regex-syntax"] }
 
 [[example]]
 name = "async_usage"
