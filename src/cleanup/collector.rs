@@ -11,6 +11,7 @@ use crate::core::lifecycle::ResourceState;
 use crate::core::registry::Registry;
 use crate::core::resource::ResourceMeta;
 use crate::namespace::{NamespaceQuota, NamespaceShared};
+use crate::observability::metrics_support;
 use crate::ownership::{DestroyOutcome, destroy_resource};
 use crate::policy::{CleanupContext, CleanupScope, CustomCleanupPolicy, PolicyDecision, Ttl};
 
@@ -49,6 +50,26 @@ impl Tag {
             Tag::SizeEviction => report.reasons.size_eviction += 1,
             Tag::CountEviction => report.reasons.count_eviction += 1,
         }
+    }
+
+    #[cfg(feature = "tracing")]
+    fn reason(self) -> &'static str {
+        match self {
+            Tag::TtlFixed => "ttl_fixed",
+            Tag::TtlIdle => "ttl_idle",
+            Tag::Eligible => "eligible",
+            Tag::Policy => "policy",
+            Tag::SizeEviction => "size_eviction",
+            Tag::CountEviction => "count_eviction",
+        }
+    }
+}
+
+/// Stable label for the metrics pipeline.
+fn scope_str(scope: &CleanupScope) -> &'static str {
+    match scope {
+        CleanupScope::Manager => "manager",
+        CleanupScope::Namespace(_) => "namespace",
     }
 }
 
@@ -111,6 +132,12 @@ impl CleanupEngine {
         Self::new(Arc::clone(shared)).run(CleanupScope::Manager, views)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(
+        skip(self, scope, views),
+        name = "cleanup_pass",
+        level = "info",
+        fields(scope = scope_str(&scope)),
+    ))]
     fn run(
         &self,
         scope: CleanupScope,
@@ -178,6 +205,8 @@ impl CleanupEngine {
                     Ok(_) => {}
                     Err(source) => {
                         report.failed += 1;
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(id = %meta.id, error = %source, "failed to move the resource to `Expired`");
                         report
                             .failure_reasons
                             .push(format!("{}: {source}", meta.id));
@@ -223,6 +252,29 @@ impl CleanupEngine {
         }
 
         report.duration = started.elapsed();
+        let scope_label = scope_str(&scope);
+        metrics_support::cleanup_run(scope_label);
+        metrics_support::cleanup_duration(scope_label, report.duration);
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            scope = scope_label,
+            scanned = report.scanned,
+            removed = report.removed,
+            skipped = report.skipped,
+            failed = report.failed,
+            deferred = report.deferred,
+            bytes_freed = report.bytes_freed,
+            duration_ms = report.duration.as_millis() as u64,
+            "cleanup pass completed"
+        );
+        self.shared
+            .emit(crate::observability::Event::CleanupCompleted {
+                instance: self.shared.config.instance_id.clone(),
+                scanned: report.scanned,
+                removed: report.removed,
+                failed: report.failed,
+                bytes_freed: report.bytes_freed,
+            });
         Ok(report)
     }
 }
@@ -329,6 +381,8 @@ fn enforce_limits(
                 .is_err()
         {
             report.failed += 1;
+            #[cfg(feature = "tracing")]
+            tracing::error!(id = %victim.id, "failed to move the resource to `Expired` before eviction");
             report.failure_reasons.push(format!(
                 "{}: failed to move the resource to `Expired` before eviction",
                 victim.id
@@ -355,7 +409,16 @@ fn destroy_and_account(
     tag: Tag,
     report: &mut CleanupReport,
 ) {
-    match destroy_resource(shared, &meta.id) {
+    #[cfg(feature = "tracing")]
+    tracing::debug!(
+        id = %meta.id,
+        namespace = %meta.namespace,
+        kind = %meta.kind,
+        reason = tag.reason(),
+        bytes = meta.size_bytes,
+        "evicting resource"
+    );
+    match destroy_resource(shared, &meta.id, "cleanup") {
         Ok(DestroyOutcome::Destroyed) => {
             report.removed += 1;
             report.bytes_freed = report.bytes_freed.saturating_add(meta.size_bytes);

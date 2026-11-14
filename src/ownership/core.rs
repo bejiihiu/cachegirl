@@ -12,6 +12,7 @@ use crate::core::lifecycle::ResourceState;
 use crate::core::resource::{Ownership, ResourceId, ResourceMeta};
 use crate::namespace::NamespaceShared;
 use crate::observability::Event;
+use crate::observability::metrics_support;
 
 /// Internal state carried by every concrete resource handle.
 ///
@@ -48,7 +49,7 @@ impl Drop for OwnershipCore {
         }
         // a misbehaving event sink must not take the process down with it
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = destroy_resource(&self.shared, &self.id);
+            let _ = destroy_resource(&self.shared, &self.id, "drop");
         }));
     }
 }
@@ -94,14 +95,27 @@ impl Drop for SealGuard<'_> {
 /// then the registry record is claimed with `remove`. Whoever loses that
 /// race observes `AlreadyGone` instead of double-releasing.
 ///
+/// `origin` says who asked for the destruction (`"release"`, `"cleanup"`
+/// or `"drop"`); it is attached to metrics and events.
+///
 /// Callers are expected to have done their own access checks first
 /// (e.g. namespace scoping in `Namespace::release`).
+#[cfg_attr(feature = "tracing", tracing::instrument(
+    skip(shared),
+    name = "destroy_resource",
+    level = "debug",
+    fields(id = %id, origin = origin),
+))]
 pub(crate) fn destroy_resource(
     shared: &Arc<NamespaceShared>,
     id: &ResourceId,
+    origin: &'static str,
 ) -> Result<DestroyOutcome, Error> {
     if !shared.leases.try_seal(id) {
         defer_resource(shared, id);
+        metrics_support::deferred_lease_operation(origin);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(id = %id, origin, "destruction deferred: leases are held");
         return Ok(DestroyOutcome::Deferred);
     }
     // unseals on every exit, including panics escaping a sink
@@ -109,9 +123,13 @@ pub(crate) fn destroy_resource(
     let meta = match shared.registry.remove(id) {
         Ok(meta) => meta,
         Err(RegistryError::NotFound(_)) => {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(id = %id, origin, "resource was already gone");
             return Ok(DestroyOutcome::AlreadyGone);
         }
         Err(source) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(id = %id, origin, error = %source, "failed to claim the registry record for destruction");
             return Err(source.into());
         }
     };
@@ -137,17 +155,40 @@ fn destroy_claimed(shared: &Arc<NamespaceShared>, meta: &ResourceMeta) -> Result
         .ok_or_else(|| BackendError::Unavailable {
             backend: "unknown".to_string(),
             reason: "the resource record does not name the backend that created it".to_string(),
-        })?;
-    let backend =
+        });
+    let backend = backend_name.and_then(|name| {
         shared
             .backends
-            .lookup(&backend_name)
+            .lookup(&name)
             .ok_or_else(|| BackendError::Unavailable {
-                backend: backend_name.clone(),
+                backend: name.clone(),
                 reason: "the backend required to release this resource is not available"
                     .to_string(),
-            })?;
-    backend.release(meta)?;
+            })
+    });
+    let backend = match backend {
+        Ok(backend) => backend,
+        Err(source) => {
+            metrics_support::resource_released(
+                &meta.namespace,
+                meta.kind,
+                metrics_support::RESULT_ERROR,
+            );
+            #[cfg(feature = "tracing")]
+            tracing::error!(id = %meta.id, namespace = %meta.namespace, kind = %meta.kind, error = %source, "failed to release resource");
+            return Err(source.into());
+        }
+    };
+    if let Err(source) = backend.release(meta) {
+        metrics_support::resource_released(
+            &meta.namespace,
+            meta.kind,
+            metrics_support::RESULT_ERROR,
+        );
+        #[cfg(feature = "tracing")]
+        tracing::error!(id = %meta.id, namespace = %meta.namespace, kind = %meta.kind, backend = %meta.metadata.get("backend").map(String::as_str).unwrap_or("unknown"), error = %source, "failed to release resource");
+        return Err(source);
+    }
 
     #[cfg(feature = "cache")]
     if meta.kind == crate::core::resource::ResourceKind::Cache {
@@ -157,6 +198,11 @@ fn destroy_claimed(shared: &Arc<NamespaceShared>, meta: &ResourceMeta) -> Result
     }
 
     shared.counters.record_release(1, meta.size_bytes);
+    metrics_support::resource_released(&meta.namespace, meta.kind, metrics_support::RESULT_OK);
+    metrics_support::bytes_freed(meta.size_bytes);
+    metrics_support::active_resources_change(-1.0);
+    #[cfg(feature = "tracing")]
+    tracing::debug!(id = %meta.id, namespace = %meta.namespace, kind = %meta.kind, bytes_freed = meta.size_bytes, "resource released");
     shared.emit(Event::ResourceReleased {
         instance: shared.config.instance_id.clone(),
         id: meta.id.clone(),

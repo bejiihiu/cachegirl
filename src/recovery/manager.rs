@@ -312,6 +312,18 @@ impl RecoveryManager {
         bytes_freed: u64,
     ) {
         let name = Self::entry_name(dir);
+        #[cfg(feature = "tracing")]
+        match action {
+            RecoveryAction::Removed => {
+                tracing::info!(instance = %name, bytes_freed, reason = %reason, "reclaimed stale instance directory");
+            }
+            RecoveryAction::Failed => {
+                tracing::warn!(instance = %name, reason = %reason, "could not reclaim stale instance directory");
+            }
+            RecoveryAction::Kept | RecoveryAction::Skipped => {
+                tracing::debug!(instance = %name, action = ?action, reason = %reason, "instance directory kept");
+            }
+        }
         match action {
             RecoveryAction::Removed => {
                 report.removed += 1;
@@ -515,6 +527,12 @@ impl RecoveryManager {
     /// which protects against pid reuse false positives for our own dir.
     /// Per-directory failures are collected in the report and never stop
     /// the pass; a top-level failure (unreadable root) is returned as an error.
+    #[cfg_attr(feature = "tracing", tracing::instrument(
+        skip(self, policy, current_instance),
+        name = "recovery",
+        level = "info",
+        fields(instance = current_instance),
+    ))]
     pub fn recover(
         &self,
         policy: RecoveryPolicy,

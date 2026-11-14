@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, Weak};
 use crate::core::error::{ConcurrencyError, RegistryError};
 use crate::core::resource::ResourceId;
 use crate::observability::StatisticsCollector;
+use crate::observability::metrics_support;
 
 #[derive(Default)]
 struct BookInner {
@@ -63,11 +64,15 @@ impl LeaseBook {
     pub fn acquire(self: &Arc<Self>, id: &ResourceId) -> Result<Lease, ConcurrencyError> {
         let mut inner = self.inner.lock().map_err(|_| ConcurrencyError::Poisoned)?;
         if inner.sealed.contains(id) {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(id = %id, "lease refused: resource destruction is in progress");
             return Err(ConcurrencyError::Destroying(id.clone()));
         }
         let count = inner.counts.entry(id.clone()).or_insert(0);
         if let Some(max) = self.max_per_resource {
             if *count >= max {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(id = %id, limit = max, "lease refused: per-resource lease limit reached");
                 return Err(ConcurrencyError::LeaseLimit(id.clone()));
             }
         }
@@ -75,6 +80,9 @@ impl LeaseBook {
         // the book outlives every lease it issues, so this is the one
         // authoritative place to count from
         self.counters.record_lease_acquire();
+        metrics_support::active_leases_change(1.0);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(id = %id, "lease acquired");
         Ok(Lease {
             id: id.clone(),
             book: Arc::downgrade(self),
@@ -142,6 +150,9 @@ impl LeaseBook {
             }
         }
         self.counters.record_lease_release();
+        metrics_support::active_leases_change(-1.0);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(id = %id, "lease released");
     }
 }
 

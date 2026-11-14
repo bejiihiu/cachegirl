@@ -14,10 +14,11 @@ use std::time::Duration;
 use crate::backend::ResourceRequest;
 #[cfg(any(feature = "memory", feature = "cache"))]
 use crate::core::error::ConfigError;
-use crate::core::error::{BackendError, ConcurrencyError, RegistryError, Result};
+use crate::core::error::{BackendError, ConcurrencyError, QuotaError, RegistryError, Result};
 use crate::core::resource::{ResourceId, ResourceKind, ResourceMeta};
 use crate::namespace::{Namespace, validate_resource_name};
 use crate::observability::Event;
+use crate::observability::metrics_support;
 
 /// Free-form options applied at resource creation time.
 #[derive(Clone, Debug, Default)]
@@ -124,6 +125,18 @@ impl Namespace {
         ))
     }
 
+    /// Bump the quota-rejection counters and log the refusal.
+    fn quota_rejected(scope: &str, error: &QuotaError) {
+        let reason = match error {
+            QuotaError::SizeExceeded { .. } => "size",
+            QuotaError::CountExceeded { .. } => "count",
+            QuotaError::Namespace { .. } => "namespace",
+        };
+        metrics_support::quota_rejection(scope, reason);
+        #[cfg(feature = "tracing")]
+        tracing::warn!(scope, reason, error = %error, "quota rejected resource creation");
+    }
+
     /// Enforce manager-wide and namespace quotas for `added_bytes`.
     ///
     /// Called with the creation lock held; the count check projects one
@@ -138,11 +151,19 @@ impl Namespace {
             max_bytes: shared.config.max_size,
             max_resources: shared.config.max_resources,
         };
-        manager_quota.check("manager", manager_bytes, manager_count, added_bytes)?;
+        if let Err(source) =
+            manager_quota.check("manager", manager_bytes, manager_count, added_bytes)
+        {
+            Self::quota_rejected("manager", &source);
+            return Err(source.into());
+        }
 
         let (ns_bytes, ns_count) = self.usage()?;
         let ns_quota = self.quota();
-        ns_quota.check(&self.name, ns_bytes, ns_count, added_bytes)?;
+        if let Err(source) = ns_quota.check(&self.name, ns_bytes, ns_count, added_bytes) {
+            Self::quota_rejected(&self.name, &source);
+            return Err(source.into());
+        }
         Ok(())
     }
 
@@ -196,7 +217,15 @@ impl Namespace {
             request.metadata.insert(k.clone(), v.clone());
         }
 
-        let mut meta = backend.create(&request)?;
+        let mut meta = match backend.create(&request) {
+            Ok(meta) => meta,
+            Err(source) => {
+                metrics_support::resource_created(&self.name, kind, metrics_support::RESULT_ERROR);
+                #[cfg(feature = "tracing")]
+                tracing::warn!(namespace = %self.name, kind = %kind, error = %source, "backend failed to create resource");
+                return Err(source);
+            }
+        };
         meta.ttl = options
             .idle_ttl
             .map(crate::policy::Ttl::Idle)
@@ -216,8 +245,15 @@ impl Namespace {
         if let Err(source) = shared.registry.register(meta.clone()) {
             // roll the physical side back so failed creations never leak
             let _ = backend.release(&meta);
+            metrics_support::resource_created(&self.name, kind, metrics_support::RESULT_ERROR);
+            #[cfg(feature = "tracing")]
+            tracing::error!(namespace = %self.name, kind = %kind, id = %meta.id, error = %source, "registry failed to record the resource; creation rolled back");
             return Err(source.into());
         }
+        metrics_support::resource_created(&self.name, kind, metrics_support::RESULT_OK);
+        metrics_support::active_resources_change(1.0);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(namespace = %self.name, kind = %kind, id = %meta.id, bytes = meta.size_bytes, "resource created");
         shared.emit(Event::ResourceCreated {
             instance: shared.config.instance_id.clone(),
             id: meta.id.clone(),
@@ -227,6 +263,12 @@ impl Namespace {
         Ok(meta)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(
+        skip(self, options),
+        name = "create_resource",
+        level = "debug",
+        fields(namespace = %self.name, kind = %kind, name = %name),
+    ))]
     fn create_with(
         &self,
         name: &str,
@@ -506,7 +548,7 @@ impl Namespace {
             return Err(RegistryError::NotFound(id.clone()).into());
         }
 
-        match crate::ownership::destroy_resource(shared, id)? {
+        match crate::ownership::destroy_resource(shared, id, "release")? {
             crate::ownership::DestroyOutcome::Destroyed => Ok(true),
             crate::ownership::DestroyOutcome::AlreadyGone
             | crate::ownership::DestroyOutcome::Deferred => Ok(false),

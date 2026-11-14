@@ -181,6 +181,8 @@ impl TempManager {
             Arc::clone(&self.shared),
         ));
         namespaces.insert(name.to_owned(), Arc::clone(&ns));
+        #[cfg(feature = "tracing")]
+        tracing::debug!(namespace = %name, "namespace created");
         Ok(ns)
     }
 
@@ -215,7 +217,14 @@ impl TempManager {
                 .map(|(name, ns)| (name.clone(), ns.sweep_view()))
                 .collect()
         };
-        let report = CleanupEngine::cleanup_manager(&self.shared, &views)?;
+        let report = match CleanupEngine::cleanup_manager(&self.shared, &views) {
+            Ok(report) => report,
+            Err(source) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(error = %source, "cleanup pass failed");
+                return Err(source);
+            }
+        };
         self.counters
             .record_gc_run(report.removed, report.bytes_freed);
         Ok(report)
@@ -278,8 +287,19 @@ impl TempManager {
     /// Blocks new namespace creation, optionally sweeps expired
     /// resources, and removes this instance's lock file. Safe to call
     /// more than once.
+    #[cfg_attr(feature = "tracing", tracing::instrument(
+        skip(self),
+        name = "shutdown",
+        level = "info",
+        fields(instance = %self.config.instance_id),
+    ))]
     pub fn shutdown(&self) -> Result<CleanupReport> {
         self.closed.store(true, Ordering::SeqCst);
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            cleanup_on_shutdown = self.config.cleanup_on_shutdown,
+            "manager shutting down"
+        );
         let report = if self.config.cleanup_on_shutdown {
             self.cleanup_expired()?
         } else {
@@ -291,6 +311,14 @@ impl TempManager {
             // lock file removal is best-effort: a crash must not fail shutdown
             let _ = recovery.remove_lock(&self.config.instance_id);
         }
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            scanned = report.scanned,
+            removed = report.removed,
+            failed = report.failed,
+            bytes_freed = report.bytes_freed,
+            "manager shut down"
+        );
         Ok(report)
     }
 }
@@ -523,6 +551,25 @@ impl TempManagerBuilder {
                         failed: report.failed,
                         bytes_freed: report.bytes_freed,
                     });
+                #[cfg(feature = "tracing")]
+                if report.failed > 0 {
+                    tracing::warn!(
+                        scanned = report.scanned,
+                        removed = report.removed,
+                        kept = report.kept,
+                        failed = report.failed,
+                        bytes_freed = report.bytes_freed,
+                        "recovery completed with failures"
+                    );
+                } else {
+                    tracing::info!(
+                        scanned = report.scanned,
+                        removed = report.removed,
+                        kept = report.kept,
+                        bytes_freed = report.bytes_freed,
+                        "recovery completed"
+                    );
+                }
                 recovery_report = Some(report);
             } else {
                 recovery_report = None;

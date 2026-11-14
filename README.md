@@ -52,8 +52,8 @@
 | `async`      | no      | async API facade, runtime-agnostic          |
 | `sync`       | no      | sync API markers                            |
 | `serde`      | no      | `Serialize`/`Deserialize` for public types  |
-| `metrics`    | no      | counter export through the `metrics` facade |
-| `tracing`    | no      | event emission through `tracing`            |
+| `metrics`    | no      | counters, gauges and histograms through the `metrics` facade |
+| `tracing`    | no      | spans and structured events through `tracing`               |
 | `tokio`      | no      | Tokio integration: blocking work on the blocking pool (implies `async`) |
 
 ## Requirements

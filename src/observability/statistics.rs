@@ -137,7 +137,13 @@ impl StatisticsCollector {
         })
     }
 
-    /// Emit counters via the `metrics` facade, when the `metrics` feature is on.
+    /// Dump the counters held by this collector as gauges via the
+    /// `metrics` facade, when the `metrics` feature is on.
+    ///
+    /// This is a point-in-time snapshot for debugging; the operations
+    /// themselves maintain the live counters and gauges
+    /// (`cachegirl_cleanup_runs_total`, `cachegirl_active_resources`,
+    /// `cachegirl_active_leases`, ...) as they go.
     #[cfg(feature = "metrics")]
     pub fn emit_metrics(&self, instance_id: &str) {
         metrics::gauge!("cachegirl_gc_runs_total", "instance" => instance_id.to_owned())

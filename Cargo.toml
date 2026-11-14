@@ -35,10 +35,21 @@ tokio = { version = "1", optional = true, default-features = false, features = [
 # dev-only runtime so doctests and async integration tests can drive futures
 # without pulling a runtime into the published crate graph
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "time"] }
+# windows-gnu has no dlltool, so no `ansi` feature (pulls nu-ansi-term → windows-sys);
+# fmt works fine without colors, just monochrome output
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry"] }
 
 [[example]]
 name = "async_usage"
 required-features = ["tokio"]
+
+[[example]]
+name = "tracing_usage"
+required-features = ["tracing", "filesystem"]
+
+[[example]]
+name = "metrics_usage"
+required-features = ["metrics", "filesystem"]
 
 [package.metadata.docs.rs]
 all-features = true
