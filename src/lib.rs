@@ -58,6 +58,27 @@
 //! - `PathBuf` serializes as a string; non-UTF-8 paths cannot cross the
 //!   roundtrip.
 //!
+//! ## Feature flags
+//!
+//! | feature      | default | what it enables                                       |
+//! | ------------ | ------- | ----------------------------------------------------- |
+//! | `filesystem` | yes     | filesystem backend, file/directory resources, recovery |
+//! | `memory`     | no      | memory backend, buffer/serialization/runtime resources |
+//! | `cache`      | no      | cache entry resources (creation requires `memory`)    |
+//! | `async`      | no      | async facade (`AsyncTempManager`), runtime-agnostic   |
+//! | `sync`       | no      | reserved marker; the sync API is always available     |
+//! | `serde`      | no      | `Serialize`/`Deserialize` for data-shaped types       |
+//! | `metrics`    | no      | counters, gauges and histograms via the `metrics` facade |
+//! | `tracing`    | no      | spans and structured events via `tracing`             |
+//! | `tokio`      | no      | Tokio integration; implies `async`                    |
+//!
+//! Guides and recipes live in the `docs/` directory of the repository
+//! (`getting-started`, `configuration`, `namespaces`, `resources`,
+//! `ownership-and-leases`, `cleanup-policies`, `crash-recovery`,
+//! `scheduler-integration`, `sync-and-async`, `observability`,
+//! `security`, `performance`, `error-handling`, `writing-a-backend`,
+//! and an index in `docs/README.md`).
+//!
 //! ## Example
 //!
 //! ```rust
