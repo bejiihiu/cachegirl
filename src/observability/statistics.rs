@@ -197,4 +197,64 @@ mod tests {
         let snap = collector.snapshot("instance-test", 1, &reg).unwrap();
         assert_eq!(snap.active_leases, 0);
     }
+
+    #[test]
+    fn snapshot_counts_expired_and_pending_cleanup_separately() {
+        let reg = Registry::new();
+        let mut active = ResourceMeta::new("live", "ns", ResourceKind::File);
+        active.state = crate::core::lifecycle::ResourceState::Active;
+        let mut expired = ResourceMeta::new("old", "ns", ResourceKind::File);
+        expired.state = crate::core::lifecycle::ResourceState::Expired;
+        let mut pending = ResourceMeta::new("queued", "ns", ResourceKind::File);
+        pending.state = crate::core::lifecycle::ResourceState::PendingCleanup;
+        for m in [active, expired, pending] {
+            reg.register(m).unwrap();
+        }
+        let collector = StatisticsCollector::new();
+        let snap = collector.snapshot("instance-test", 1, &reg).unwrap();
+        assert_eq!(snap.resources, 3);
+        assert_eq!(snap.expired, 1);
+        assert_eq!(snap.pending_cleanup, 1);
+    }
+
+    #[test]
+    fn gc_runs_and_plain_releases_accumulate_independently() {
+        let reg = Registry::new();
+        let collector = StatisticsCollector::new();
+        collector.record_gc_run(2, 100);
+        collector.record_gc_run(3, 200);
+        collector.record_release(1, 50);
+        let snap = collector.snapshot("instance-test", 1, &reg).unwrap();
+        assert_eq!(snap.gc_runs, 2);
+        assert_eq!(snap.resources_released, 6);
+        assert_eq!(snap.bytes_freed, 350);
+    }
+
+    #[test]
+    fn empty_registry_yields_a_zeroed_snapshot() {
+        let reg = Registry::new();
+        let collector = StatisticsCollector::new();
+        let before = SystemTime::now();
+        let snap = collector.snapshot("instance-test", 0, &reg).unwrap();
+        assert_eq!(snap.resources, 0);
+        assert_eq!(snap.bytes_tracked, 0);
+        assert_eq!(snap.expired, 0);
+        assert_eq!(snap.pending_cleanup, 0);
+        assert_eq!(snap.gc_runs, 0);
+        let taken = snap.captured_at.expect("snapshot must record its time");
+        assert!(taken >= before);
+    }
+
+    #[test]
+    fn render_mentions_instance_and_counters() {
+        let snap = Statistics {
+            instance_id: "instance-xyz".into(),
+            ..Statistics::default()
+        };
+        let rendered = snap.render();
+        assert!(rendered.contains("instance-xyz"));
+        assert!(rendered.contains("resources:"));
+        assert!(rendered.contains("leases:"));
+        assert!(rendered.contains("gc runs:"));
+    }
 }

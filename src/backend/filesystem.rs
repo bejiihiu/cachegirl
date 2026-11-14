@@ -38,17 +38,25 @@ pub(crate) fn normalize_lexically(path: &Path) -> Result<PathBuf> {
 }
 
 /// Validate a single path segment (file or directory name).
+///
+/// On top of the traversal and control-character rules, `:` is rejected
+/// (on NTFS it silently denotes an alternate data stream) and names may
+/// not end with `.`: Windows strips trailing dots, which would make
+/// `probe` and `probe.` alias the same file.
 pub(crate) fn validate_segment(name: &str) -> Result<()> {
     let trimmed = name.trim();
     if trimmed.is_empty()
         || trimmed != name
         || name == "."
         || name == ".."
-        || name.contains(['/', '\\'])
+        || name.contains(['/', '\\', ':'])
     {
         return Err(AccessError::UnsafeName(name.to_owned()).into());
     }
     if name.chars().any(|c| c.is_control()) {
+        return Err(AccessError::UnsafeName(name.to_owned()).into());
+    }
+    if name.ends_with('.') {
         return Err(AccessError::UnsafeName(name.to_owned()).into());
     }
     Ok(())
@@ -257,6 +265,141 @@ mod tests {
         let be = backend(dir.path());
         let req = ResourceRequest::new("data.bin", "ns", ResourceKind::File);
         be.create(&req).unwrap();
+        assert!(be.create(&req).is_err());
+    }
+
+    #[test]
+    fn validate_segment_accepts_unicode_and_long_names() {
+        assert!(validate_segment("файл.bin").is_ok());
+        assert!(validate_segment("☃-snowman.txt").is_ok());
+        let long = "x".repeat(1000);
+        assert!(validate_segment(&long).is_ok());
+        // dots inside a name are fine, only trailing ones alias on windows
+        assert!(validate_segment("archive.tar.gz").is_ok());
+        assert!(validate_segment(".hidden").is_ok());
+    }
+
+    #[test]
+    fn validate_segment_rejects_trailing_dots_and_colons() {
+        // windows strips trailing dots, aliasing "name" and "name."
+        assert!(validate_segment("probe.").is_err());
+        assert!(validate_segment("...").is_err());
+        assert!(validate_segment("archive.tar.").is_err());
+        // ':' silently names an alternate data stream on NTFS
+        assert!(validate_segment("a:b").is_err());
+        assert!(validate_segment(":stream").is_err());
+    }
+
+    #[test]
+    fn validate_segment_rejects_mixed_separators() {
+        use super::validate_segment as v;
+        assert!(v("a/b").is_err());
+        assert!(v("a\\b").is_err());
+        assert!(v("a/b\\c").is_err());
+        assert!(v("a\\b/c").is_err());
+    }
+
+    #[test]
+    fn validate_segment_rejects_control_characters_and_padding() {
+        use super::validate_segment as v;
+        assert!(v("a\u{0}b").is_err());
+        assert!(v("a\u{7f}b").is_err());
+        assert!(v("a\u{1f}b").is_err());
+        assert!(v(" padded").is_err());
+        assert!(v("padded ").is_err());
+        assert!(v("a\tb").is_err());
+    }
+
+    #[test]
+    fn normalize_resolves_dot_and_duplicate_separators() {
+        let p = normalize_lexically(Path::new("/a/./b")).unwrap();
+        assert_eq!(p, PathBuf::from("/a/b"));
+        assert_eq!(
+            normalize_lexically(Path::new("/a/.")).unwrap(),
+            PathBuf::from("/a")
+        );
+        assert_eq!(
+            normalize_lexically(Path::new("/a/b/../..")).unwrap(),
+            PathBuf::from("/")
+        );
+        // ".." must never climb above the anchor
+        assert!(normalize_lexically(Path::new("/a/../..")).is_err());
+        assert!(normalize_lexically(Path::new("..")).is_err());
+    }
+
+    #[test]
+    fn release_outside_the_root_is_refused_and_keeps_the_file() {
+        let dir = crate::testsupport::TestDir::new();
+        let be = backend(dir.path());
+        let outside = crate::testsupport::TestDir::new();
+        let victim = outside.path().join("victim.bin");
+        std::fs::write(&victim, b"precious").unwrap();
+
+        // a meta record pointing straight at a file outside the backend
+        // root must never authorize deleting it
+        let mut meta = ResourceMeta::new("victim.bin", "ns", ResourceKind::File);
+        meta.metadata
+            .insert("path".into(), victim.to_string_lossy().into_owned());
+        assert!(be.release(&meta).is_err());
+        assert!(victim.exists());
+
+        // same, but the path escapes through ".."
+        let escape = dir
+            .path()
+            .join("..")
+            .join(outside.path().file_name().unwrap())
+            .join("victim.bin");
+        let mut meta = ResourceMeta::new("victim.bin", "ns", ResourceKind::File);
+        meta.metadata
+            .insert("path".into(), escape.to_string_lossy().into_owned());
+        assert!(be.release(&meta).is_err());
+        assert!(victim.exists());
+    }
+
+    #[test]
+    fn release_with_dotdot_that_stays_inside_the_root_works() {
+        let dir = crate::testsupport::TestDir::new();
+        let be = backend(dir.path());
+        let req = ResourceRequest::new("data.bin", "ns", ResourceKind::File);
+        let meta = be.create(&req).unwrap();
+        let path = PathBuf::from(meta.metadata.get("path").unwrap());
+        // reroute the record through a redundant "ns/../ns" detour that
+        // normalizes back inside the root
+        let detour = be
+            .root()
+            .join("instance-test")
+            .join("ns")
+            .join("..")
+            .join("ns")
+            .join("data.bin");
+        let mut detoured = meta.clone();
+        detoured
+            .metadata
+            .insert("path".into(), detour.to_string_lossy().into_owned());
+        be.release(&detoured).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn release_removes_a_directory_tree() {
+        let dir = crate::testsupport::TestDir::new();
+        let be = backend(dir.path());
+        let req = ResourceRequest::new("workdir", "ns", ResourceKind::Directory);
+        let meta = be.create(&req).unwrap();
+        let path = PathBuf::from(meta.metadata.get("path").unwrap());
+        std::fs::create_dir_all(path.join("nested/deep")).unwrap();
+        std::fs::write(path.join("nested/deep/f.bin"), b"x").unwrap();
+        be.release(&meta).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn create_rejects_a_name_with_a_colon() {
+        let dir = crate::testsupport::TestDir::new();
+        let be = backend(dir.path());
+        let req = ResourceRequest::new("a:b", "ns", ResourceKind::File);
+        assert!(be.create(&req).is_err());
+        let req = ResourceRequest::new("probe.", "ns", ResourceKind::File);
         assert!(be.create(&req).is_err());
     }
 }

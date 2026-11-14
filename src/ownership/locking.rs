@@ -84,4 +84,41 @@ mod tests {
         assert!(!set.is_locked(&id));
         assert!(set.try_acquire(&id).is_ok());
     }
+
+    #[test]
+    fn locks_on_different_ids_do_not_interfere() {
+        let set = LockSet::new();
+        let a = ResourceId::new();
+        let b = ResourceId::new();
+        let guard_a = set.try_acquire(&a).unwrap();
+        let guard_b = set.try_acquire(&b).unwrap();
+        assert!(set.is_locked(&a));
+        assert!(set.is_locked(&b));
+        drop(guard_a);
+        assert!(!set.is_locked(&a));
+        assert!(set.is_locked(&b));
+        drop(guard_b);
+        assert!(!set.is_locked(&b));
+    }
+
+    #[test]
+    fn relock_after_drop_is_repeatable() {
+        let set = LockSet::new();
+        let id = ResourceId::new();
+        for round in 0..3 {
+            let guard = set.try_acquire(&id).unwrap();
+            assert!(set.is_locked(&id), "round {round}");
+            assert!(set.try_acquire(&id).is_err());
+            drop(guard);
+            assert!(!set.is_locked(&id), "round {round}");
+        }
+    }
+
+    #[test]
+    fn guard_reports_the_resource_it_locks() {
+        let set = LockSet::new();
+        let id = ResourceId::new();
+        let guard = set.try_acquire(&id).unwrap();
+        assert_eq!(guard.id(), &id);
+    }
 }

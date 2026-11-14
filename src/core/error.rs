@@ -281,3 +281,257 @@ pub enum Error {
 
 /// Convenience alias used across the crate.
 pub type Result<T> = core::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render<E: std::error::Error>(err: &E) -> String {
+        let rendered = err.to_string();
+        assert!(!rendered.is_empty(), "an error rendered as an empty string");
+        rendered
+    }
+
+    #[test]
+    fn resource_creation_errors_render() {
+        let io = render(&ResourceCreationError::Io(std::io::Error::other("boom")));
+        assert!(io.contains("boom"));
+        let name = render(&ResourceCreationError::InvalidName("bad/name".into()));
+        assert!(name.contains("bad/name"));
+        let unsupported = render(&ResourceCreationError::UnsupportedKind {
+            backend: "memory".into(),
+            kind: "file".into(),
+        });
+        assert!(unsupported.contains("memory"));
+        assert!(unsupported.contains("file"));
+        let backend = render(&ResourceCreationError::Backend {
+            backend: "filesystem".into(),
+            source: BackendError::Rejected {
+                backend: "filesystem".into(),
+                reason: "no space left".into(),
+            },
+        });
+        assert!(backend.contains("filesystem"));
+        assert!(backend.contains("no space left"));
+    }
+
+    #[test]
+    fn backend_errors_render() {
+        let unavailable = render(&BackendError::Unavailable {
+            backend: "filesystem".into(),
+            reason: "read-only root".into(),
+        });
+        assert!(unavailable.contains("read-only root"));
+        let io = render(&BackendError::Io {
+            backend: "filesystem".into(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        });
+        assert!(io.contains("filesystem"));
+        assert!(io.contains("denied"));
+        let rejected = render(&BackendError::Rejected {
+            backend: "cache".into(),
+            reason: "duplicate key".into(),
+        });
+        assert!(rejected.contains("duplicate key"));
+        let escape = render(&BackendError::PathEscape(PathBuf::from("/etc/passwd")));
+        assert!(escape.contains("/etc/passwd"));
+    }
+
+    #[test]
+    fn quota_errors_render() {
+        let size = render(&QuotaError::SizeExceeded {
+            limit: 100,
+            requested: 101,
+        });
+        assert!(size.contains("100"));
+        assert!(size.contains("101"));
+        let count = render(&QuotaError::CountExceeded { limit: 7 });
+        assert!(count.contains('7'));
+        let ns = render(&QuotaError::Namespace {
+            namespace: "protocol".into(),
+            reason: "count".into(),
+        });
+        assert!(ns.contains("protocol"));
+    }
+
+    #[test]
+    fn access_errors_render() {
+        let denied = render(&AccessError::PermissionDenied("root owned".into()));
+        assert!(denied.contains("root owned"));
+        let outside = render(&AccessError::OutsideRoot {
+            path: PathBuf::from("/tmp/escape"),
+            root: PathBuf::from("/tmp/root"),
+        });
+        assert!(outside.contains("/tmp/escape"));
+        assert!(outside.contains("/tmp/root"));
+        let symlink = render(&AccessError::SymlinkRejected(PathBuf::from("/tmp/link")));
+        assert!(symlink.contains("/tmp/link"));
+        let name = render(&AccessError::UnsafeName("a/b".into()));
+        assert!(name.contains("a/b"));
+    }
+
+    #[test]
+    fn registry_errors_render() {
+        let id = ResourceId::new();
+        let not_found = render(&RegistryError::NotFound(id.clone()));
+        assert!(not_found.contains(id.as_str()));
+        let already = render(&RegistryError::AlreadyRegistered(id.clone()));
+        assert!(already.contains(id.as_str()));
+        let transition = render(&RegistryError::InvalidTransition {
+            from: ResourceState::Created,
+            to: ResourceState::Destroyed,
+        });
+        assert!(transition.contains("Created"));
+        assert!(transition.contains("Destroyed"));
+        let poisoned = render(&RegistryError::Poisoned);
+        assert!(poisoned.contains("poisoned"));
+    }
+
+    #[test]
+    fn cleanup_errors_render() {
+        let id = ResourceId::new();
+        let removal = render(&CleanupError::Removal {
+            id: id.clone(),
+            reason: "file is locked".into(),
+        });
+        assert!(removal.contains(id.as_str()));
+        assert!(removal.contains("file is locked"));
+        let io = render(&CleanupError::Io(std::io::Error::other("disk gone")));
+        assert!(io.contains("disk gone"));
+        let leased = render(&CleanupError::Leased(id.clone()));
+        assert!(leased.contains(id.as_str()));
+    }
+
+    #[test]
+    fn recovery_errors_render() {
+        let inspect = render(&RecoveryError::Inspect {
+            path: PathBuf::from("/var/tmp/instance-1"),
+            source: std::io::Error::other("unreadable"),
+        });
+        assert!(inspect.contains("instance-1"));
+        assert!(inspect.contains("unreadable"));
+        let corrupt = render(&RecoveryError::CorruptLock {
+            path: PathBuf::from("/var/tmp/instance-1/.cachegirl.lock"),
+            reason: "no pid field".into(),
+        });
+        assert!(corrupt.contains("no pid field"));
+        let live = render(&RecoveryError::LiveInstance {
+            path: PathBuf::from("/var/tmp/instance-2"),
+            pid: 4242,
+        });
+        assert!(live.contains("4242"));
+        assert!(live.contains("instance-2"));
+    }
+
+    #[test]
+    fn concurrency_errors_render() {
+        let id = ResourceId::new();
+        let locked = render(&ConcurrencyError::Locked(id.clone()));
+        assert!(locked.contains(id.as_str()));
+        let limit = render(&ConcurrencyError::LeaseLimit(id.clone()));
+        assert!(limit.contains(id.as_str()));
+        let destroying = render(&ConcurrencyError::Destroying(id.clone()));
+        assert!(destroying.contains(id.as_str()));
+        assert!(!render(&ConcurrencyError::Cancelled).is_empty());
+        let panic = render(&ConcurrencyError::BlockingTaskPanic("worker died".into()));
+        assert!(panic.contains("worker died"));
+        assert!(!render(&ConcurrencyError::ManagerClosed).is_empty());
+        assert!(!render(&ConcurrencyError::Poisoned).is_empty());
+    }
+
+    #[test]
+    fn config_errors_render() {
+        let root = render(&ConfigError::RootMissing(PathBuf::from("/no/such/root")));
+        assert!(root.contains("/no/such/root"));
+        let create = render(&ConfigError::RootCreate {
+            path: PathBuf::from("/cannot/create"),
+            source: std::io::Error::other("permission denied"),
+        });
+        assert!(create.contains("/cannot/create"));
+        assert!(create.contains("permission denied"));
+        let instance = render(&ConfigError::InvalidInstanceId("bad id".into()));
+        assert!(instance.contains("bad id"));
+        let namespace = render(&ConfigError::InvalidNamespaceName("a/b".into()));
+        assert!(namespace.contains("a/b"));
+        let invalid = render(&ConfigError::Invalid("unsupported option".into()));
+        assert!(invalid.contains("unsupported option"));
+    }
+
+    #[test]
+    fn top_level_wrappers_are_transparent() {
+        // the outer enum must add no formatting of its own
+        let cases: Vec<(Error, String)> = vec![
+            (
+                ResourceCreationError::InvalidName("x".into()).into(),
+                ResourceCreationError::InvalidName("x".into()).to_string(),
+            ),
+            (
+                BackendError::PathEscape(PathBuf::from("/e")).into(),
+                BackendError::PathEscape(PathBuf::from("/e")).to_string(),
+            ),
+            (
+                QuotaError::CountExceeded { limit: 1 }.into(),
+                QuotaError::CountExceeded { limit: 1 }.to_string(),
+            ),
+            (
+                AccessError::UnsafeName("n".into()).into(),
+                AccessError::UnsafeName("n".into()).to_string(),
+            ),
+            (
+                RegistryError::Poisoned.into(),
+                RegistryError::Poisoned.to_string(),
+            ),
+            (
+                CleanupError::Io(std::io::Error::other("e")).into(),
+                CleanupError::Io(std::io::Error::other("e")).to_string(),
+            ),
+            (
+                RecoveryError::LiveInstance {
+                    path: PathBuf::from("/p"),
+                    pid: 1,
+                }
+                .into(),
+                RecoveryError::LiveInstance {
+                    path: PathBuf::from("/p"),
+                    pid: 1,
+                }
+                .to_string(),
+            ),
+            (
+                ConcurrencyError::ManagerClosed.into(),
+                ConcurrencyError::ManagerClosed.to_string(),
+            ),
+            (
+                ConfigError::Invalid("c".into()).into(),
+                ConfigError::Invalid("c".into()).to_string(),
+            ),
+        ];
+        for (wrapper, inner) in cases {
+            assert_eq!(wrapper.to_string(), inner);
+        }
+    }
+
+    #[test]
+    fn io_backed_variants_expose_a_source() {
+        use std::error::Error as _;
+        let err = CleanupError::Io(std::io::Error::other("boom"));
+        assert!(err.source().is_some());
+        let err = BackendError::Io {
+            backend: "b".into(),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(err.source().is_some());
+        let err = ResourceCreationError::Io(std::io::Error::other("boom"));
+        assert!(err.source().is_some());
+        let err = RecoveryError::Inspect {
+            path: PathBuf::from("/p"),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(err.source().is_some());
+        let err = ConfigError::RootCreate {
+            path: PathBuf::from("/p"),
+            source: std::io::Error::other("boom"),
+        };
+        assert!(err.source().is_some());
+    }
+}

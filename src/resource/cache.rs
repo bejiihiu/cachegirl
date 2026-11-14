@@ -225,4 +225,58 @@ mod tests {
         assert!(entry.last_accessed >= before);
         assert_eq!(entry.len(), 3);
     }
+
+    #[test]
+    fn new_entries_start_with_both_timestamps_set() {
+        let before = SystemTime::now();
+        let entry = CacheEntry::new("k", vec![1]);
+        assert!(entry.created_at >= before);
+        assert_eq!(entry.created_at, entry.last_accessed);
+        assert!(!entry.is_empty());
+        assert_eq!(entry.len(), 1);
+        assert!(CacheEntry::new("empty", Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn store_is_scoped_by_namespace() {
+        let store = CacheStore::new();
+        let id = ResourceId::new();
+        let entry = Arc::new(Mutex::new(CacheEntry::new("k", vec![1])));
+        store.insert("ns-a", "k", id.clone(), Arc::clone(&entry));
+        assert!(store.contains("ns-a", "k"));
+        assert!(!store.contains("ns-b", "k"));
+        assert!(store.get("ns-b", "k").is_none());
+        assert!(store.remove("ns-b", "k").is_none());
+        assert!(store.get("ns-a", "k").is_some());
+    }
+
+    #[test]
+    fn reinserting_a_key_hands_back_the_previous_entry() {
+        let store = CacheStore::new();
+        let first_id = ResourceId::new();
+        let second_id = ResourceId::new();
+        let entry = Arc::new(Mutex::new(CacheEntry::new("k", vec![1])));
+        let previous = store.insert("ns", "k", first_id.clone(), Arc::clone(&entry));
+        assert!(
+            previous.is_none(),
+            "first insert must not report a previous entry"
+        );
+        let previous = store
+            .insert("ns", "k", second_id.clone(), Arc::clone(&entry))
+            .expect("re-insert must return the evicted slot");
+        assert_eq!(previous.id, first_id);
+        assert_eq!(store.get("ns", "k").unwrap().id, second_id);
+    }
+
+    #[test]
+    fn remove_hands_back_the_entry_and_frees_the_key() {
+        let store = CacheStore::new();
+        let id = ResourceId::new();
+        let entry = Arc::new(Mutex::new(CacheEntry::new("k", vec![9, 8])));
+        store.insert("ns", "k", id.clone(), entry);
+        let removed = store.remove("ns", "k").expect("entry must be removable");
+        assert_eq!(removed.id, id);
+        assert!(!store.contains("ns", "k"));
+        assert!(store.remove("ns", "k").is_none());
+    }
 }

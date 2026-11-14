@@ -230,6 +230,98 @@ mod tests {
     }
 
     #[test]
+    fn seal_unseal_cycles_are_repeatable() {
+        let book = LeaseBook::new();
+        let id = ResourceId::new();
+        for _ in 0..3 {
+            assert!(book.try_seal(&id));
+            assert!(book.acquire(&id).is_err());
+            book.unseal(&id);
+        }
+        // repeated unseal must not corrupt anything either
+        book.unseal(&id);
+        assert!(book.acquire(&id).is_ok());
+    }
+
+    #[test]
+    fn unseal_of_a_never_sealed_id_is_a_noop() {
+        let book = LeaseBook::new();
+        let id = ResourceId::new();
+        book.unseal(&id);
+        assert_eq!(book.lease_count(&id).unwrap(), 0);
+        assert!(book.acquire(&id).is_ok());
+    }
+
+    #[test]
+    fn double_seal_then_a_single_unseal_reopens_the_gate() {
+        // unseal is remove-from-set, not reference counting: two seals go
+        // in, one unseal clears
+        let book = LeaseBook::new();
+        let id = ResourceId::new();
+        assert!(book.try_seal(&id));
+        assert!(book.try_seal(&id));
+        book.unseal(&id);
+        assert!(book.acquire(&id).is_ok());
+    }
+
+    #[test]
+    fn seal_races_held_leases_and_loses_every_time() {
+        let book = LeaseBook::new();
+        let id = ResourceId::new();
+        let held = book.acquire(&id).unwrap();
+        // while any lease exists, no number of seal attempts may win
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let book = Arc::clone(&book);
+            let id = id.clone();
+            handles.push(std::thread::spawn(move || book.try_seal(&id)));
+        }
+        for h in handles {
+            assert!(!h.join().unwrap(), "a seal landed while a lease was held");
+        }
+        drop(held);
+        assert!(book.try_seal(&id));
+    }
+
+    #[test]
+    fn limited_book_allows_reacquire_after_a_drop() {
+        let book = LeaseBook::with_limit(2);
+        let id = ResourceId::new();
+        let first = book.acquire(&id).unwrap();
+        let second = book.acquire(&id).unwrap();
+        assert!(book.acquire(&id).is_err());
+        drop(first);
+        let _third = book.acquire(&id).unwrap();
+        assert_eq!(book.lease_count(&id).unwrap(), 2);
+        drop(second);
+    }
+
+    #[test]
+    fn lease_reports_the_resource_it_guards() {
+        let book = LeaseBook::new();
+        let id = ResourceId::new();
+        let lease = book.acquire(&id).unwrap();
+        assert_eq!(lease.id(), &id);
+    }
+
+    #[test]
+    fn total_leases_returns_to_zero_after_full_release() {
+        let book = LeaseBook::new();
+        let a = ResourceId::new();
+        let b = ResourceId::new();
+        let l1 = book.acquire(&a).unwrap();
+        let l2 = book.acquire(&a).unwrap();
+        let l3 = book.acquire(&b).unwrap();
+        assert_eq!(book.total_leases().unwrap(), 3);
+        drop(l1);
+        drop(l2);
+        drop(l3);
+        assert_eq!(book.total_leases().unwrap(), 0);
+        assert_eq!(book.lease_count(&a).unwrap(), 0);
+        assert_eq!(book.lease_count(&b).unwrap(), 0);
+    }
+
+    #[test]
     fn seal_fails_while_leases_are_held() {
         let book = LeaseBook::new();
         let id = ResourceId::new();

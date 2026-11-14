@@ -518,4 +518,33 @@ mod tests {
         assert_eq!(report.deferred, report.reasons.lease_deferred);
         assert_eq!(report.reasons.eligible, 2);
     }
+
+    #[test]
+    fn failed_cleanup_is_retried_until_the_attempt_budget_runs_out() {
+        // one below the cap: the next pass must try again
+        let dir = crate::testsupport::TestDir::new();
+        let shared = crate::namespace::test_shared(dir.path());
+        let engine = CleanupEngine::new(Arc::clone(&shared));
+
+        let mut retryable = ResourceMeta::new("almost", "ns", ResourceKind::File);
+        retryable.state = ResourceState::FailedCleanup;
+        retryable.cleanup_attempts = crate::cleanup::MAX_CLEANUP_ATTEMPTS - 1;
+        shared.registry.register(retryable).unwrap();
+        let report = engine.cleanup().unwrap();
+        assert_eq!(report.removed, 1);
+
+        // at the cap: the record is left alone for a human to inspect
+        let mut exhausted = ResourceMeta::new("spent", "ns", ResourceKind::File);
+        exhausted.state = ResourceState::FailedCleanup;
+        exhausted.cleanup_attempts = crate::cleanup::MAX_CLEANUP_ATTEMPTS;
+        shared.registry.register(exhausted.clone()).unwrap();
+        let report = engine.cleanup().unwrap();
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.skipped, 1);
+        // the record survives for inspection
+        let meta = shared.registry.get(&exhausted.id).unwrap();
+        assert_eq!(meta.state, ResourceState::FailedCleanup);
+        assert_eq!(meta.cleanup_attempts, crate::cleanup::MAX_CLEANUP_ATTEMPTS);
+    }
 }

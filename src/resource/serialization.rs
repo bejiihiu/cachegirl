@@ -66,3 +66,60 @@ impl AsRef<[u8]> for SerializationResource {
         self.as_slice()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_core(mode: crate::core::resource::Ownership) -> Arc<OwnershipCore> {
+        let dir = crate::testsupport::TestDir::new();
+        let shared = crate::namespace::test_shared(dir.path());
+        // the temp dir backing the shared root may vanish when this helper
+        // returns; nothing in this resource touches the filesystem
+        let id = ResourceId::new();
+        Arc::new(OwnershipCore::new(shared, id.clone(), mode))
+    }
+
+    #[test]
+    fn len_and_is_empty_track_the_payload() {
+        let id = ResourceId::new();
+        let empty = SerializationResource::new(
+            id.clone(),
+            Vec::new(),
+            test_core(crate::core::resource::Ownership::Managed),
+        );
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+
+        let full = SerializationResource::new(
+            id,
+            vec![1, 2, 3, 4],
+            test_core(crate::core::resource::Ownership::Managed),
+        );
+        assert_eq!(full.len(), 4);
+        assert!(!full.is_empty());
+    }
+
+    #[test]
+    fn as_slice_and_as_ref_agree() {
+        let bytes = vec![0xde, 0xad, 0xbe, 0xef];
+        let res = SerializationResource::new(
+            ResourceId::new(),
+            bytes.clone(),
+            test_core(crate::core::resource::Ownership::Managed),
+        );
+        assert_eq!(res.as_slice(), bytes.as_slice());
+        assert_eq!(res.as_ref(), bytes.as_slice());
+    }
+
+    #[test]
+    fn into_vec_returns_the_payload_intact() {
+        let bytes = vec![7; 64];
+        let res = SerializationResource::new(
+            ResourceId::new(),
+            bytes.clone(),
+            test_core(crate::core::resource::Ownership::Managed),
+        );
+        assert_eq!(res.into_vec(), bytes);
+    }
+}

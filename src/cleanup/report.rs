@@ -132,3 +132,147 @@ impl fmt::Display for CleanupReport {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn destroyed_sums_every_removal_cause_but_not_deferrals() {
+        let reasons = RemovalReasons {
+            ttl_fixed: 1,
+            ttl_idle: 2,
+            size_eviction: 4,
+            count_eviction: 8,
+            policy: 16,
+            lease_deferred: 32,
+            eligible: 64,
+        };
+        assert_eq!(reasons.destroyed(), 95);
+    }
+
+    #[test]
+    fn is_quiet_requires_nothing_removed_and_nothing_deferred() {
+        assert!(RemovalReasons::default().is_quiet());
+        assert!(
+            !RemovalReasons {
+                lease_deferred: 1,
+                ..RemovalReasons::default()
+            }
+            .is_quiet()
+        );
+        assert!(
+            !RemovalReasons {
+                ttl_fixed: 1,
+                ..RemovalReasons::default()
+            }
+            .is_quiet()
+        );
+    }
+
+    #[test]
+    fn report_is_quiet_ignores_skips_and_deferrals() {
+        // "quiet" means nothing was reclaimed and nothing failed; a pass
+        // that only skipped or deferred counts as quiet
+        let report = CleanupReport {
+            skipped: 5,
+            deferred: 3,
+            ..CleanupReport::default()
+        };
+        assert!(report.is_quiet());
+        assert!(
+            !CleanupReport {
+                removed: 1,
+                ..CleanupReport::default()
+            }
+            .is_quiet()
+        );
+        assert!(
+            !CleanupReport {
+                failed: 1,
+                ..CleanupReport::default()
+            }
+            .is_quiet()
+        );
+    }
+
+    #[test]
+    fn display_shows_only_nonzero_reasons() {
+        let report = CleanupReport {
+            scanned: 10,
+            removed: 3,
+            skipped: 7,
+            failed: 0,
+            deferred: 0,
+            bytes_freed: 128,
+            duration: Duration::from_millis(3),
+            failure_reasons: Vec::new(),
+            reasons: RemovalReasons {
+                ttl_fixed: 2,
+                policy: 1,
+                ..RemovalReasons::default()
+            },
+        };
+        let rendered = report.to_string();
+        assert!(rendered.contains("scanned=10"));
+        assert!(rendered.contains("removed=3"));
+        assert!(rendered.contains("bytes_freed=128"));
+        assert!(rendered.contains("ttl_fixed=2"));
+        assert!(rendered.contains("policy=1"));
+        assert!(!rendered.contains("ttl_idle"));
+        assert!(!rendered.contains("eligible"));
+    }
+
+    #[test]
+    fn display_without_reasons_has_no_breakdown_section() {
+        let report = CleanupReport::default();
+        let rendered = report.to_string();
+        assert!(!rendered.contains('('));
+        assert!(rendered.contains("scanned=0"));
+    }
+
+    #[test]
+    fn display_lists_every_nonzero_reason_in_fixed_order() {
+        let report = CleanupReport {
+            reasons: RemovalReasons {
+                ttl_fixed: 1,
+                ttl_idle: 2,
+                size_eviction: 3,
+                count_eviction: 4,
+                policy: 5,
+                lease_deferred: 6,
+                eligible: 7,
+            },
+            ..CleanupReport::default()
+        };
+        let rendered = report.to_string();
+        let order = rendered
+            .split('(')
+            .nth(1)
+            .unwrap_or_default()
+            .split(',')
+            .map(|entry| {
+                entry
+                    .trim()
+                    .split('=')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        // fixed display order keeps logs greppable regardless of which
+        // reasons actually fired
+        assert_eq!(
+            order,
+            vec![
+                "ttl_fixed",
+                "ttl_idle",
+                "size_eviction",
+                "count_eviction",
+                "policy",
+                "lease_deferred",
+                "eligible"
+            ]
+        );
+    }
+}

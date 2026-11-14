@@ -138,4 +138,20 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn builder_idle_ttl_sets_the_idle_variant() {
+        let p = CleanupPolicy::builder()
+            .idle_ttl(Duration::from_secs(42))
+            .build();
+        assert_eq!(p.ttl, Some(Ttl::Idle(Duration::from_secs(42))));
+    }
+
+    #[test]
+    fn default_priority_is_normal_and_ordering_is_antisymmetric() {
+        assert_eq!(Priority::default(), Priority::Normal);
+        assert!(Priority::Low < Priority::Normal);
+        assert!(Priority::Normal < Priority::High);
+        assert!(Priority::High < Priority::Critical);
+    }
 }

@@ -68,3 +68,48 @@ where
         self(resource, context)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::resource::{ResourceKind, ResourceMeta};
+    use std::time::SystemTime;
+
+    #[test]
+    fn policy_decision_defaults_to_keep() {
+        assert_eq!(PolicyDecision::default(), PolicyDecision::Keep);
+    }
+
+    #[test]
+    fn cleanup_scope_equality_is_structural() {
+        assert_eq!(CleanupScope::Manager, CleanupScope::Manager);
+        assert_eq!(
+            CleanupScope::Namespace("net".into()),
+            CleanupScope::Namespace("net".into())
+        );
+        assert_ne!(
+            CleanupScope::Namespace("net".into()),
+            CleanupScope::Namespace("db".into())
+        );
+        assert_ne!(CleanupScope::Manager, CleanupScope::Namespace("net".into()));
+    }
+
+    #[test]
+    fn closure_policy_sees_the_scope_it_is_asked_about() {
+        let policy = |_: &ResourceMeta, ctx: &CleanupContext| match &ctx.scope {
+            CleanupScope::Manager => PolicyDecision::Remove,
+            CleanupScope::Namespace(_) => PolicyDecision::Keep,
+        };
+        let meta = ResourceMeta::new("x", "ns", ResourceKind::File);
+        let manager_ctx = CleanupContext {
+            now: SystemTime::UNIX_EPOCH,
+            scope: CleanupScope::Manager,
+        };
+        let ns_ctx = CleanupContext {
+            now: SystemTime::UNIX_EPOCH,
+            scope: CleanupScope::Namespace("ns".into()),
+        };
+        assert_eq!(policy.decide(&meta, &manager_ctx), PolicyDecision::Remove);
+        assert_eq!(policy.decide(&meta, &ns_ctx), PolicyDecision::Keep);
+    }
+}

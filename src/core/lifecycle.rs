@@ -80,6 +80,112 @@ impl ResourceState {
 mod tests {
     use super::*;
 
+    // every legal (from, to) pair, pinned exhaustively: the state machine
+    // is the crate's bookkeeping backbone, so silent drift here corrupts
+    // everything downstream
+    const LEGAL: &[(ResourceState, ResourceState)] = &[
+        (ResourceState::Uninitialized, ResourceState::Created),
+        (ResourceState::Uninitialized, ResourceState::Invalid),
+        (ResourceState::Created, ResourceState::Active),
+        (ResourceState::Created, ResourceState::Locked),
+        (ResourceState::Created, ResourceState::Expired),
+        (ResourceState::Created, ResourceState::PendingCleanup),
+        (ResourceState::Created, ResourceState::Invalid),
+        (ResourceState::Created, ResourceState::Recovering),
+        (ResourceState::Active, ResourceState::Locked),
+        (ResourceState::Active, ResourceState::Expired),
+        (ResourceState::Active, ResourceState::PendingCleanup),
+        (ResourceState::Active, ResourceState::Invalid),
+        (ResourceState::Active, ResourceState::Recovering),
+        (ResourceState::Locked, ResourceState::Active),
+        (ResourceState::Locked, ResourceState::Expired),
+        (ResourceState::Locked, ResourceState::PendingCleanup),
+        (ResourceState::Locked, ResourceState::Invalid),
+        (ResourceState::Locked, ResourceState::Recovering),
+        (ResourceState::Expired, ResourceState::PendingCleanup),
+        (ResourceState::PendingCleanup, ResourceState::Destroyed),
+        (ResourceState::PendingCleanup, ResourceState::FailedCleanup),
+        (ResourceState::FailedCleanup, ResourceState::PendingCleanup),
+        (ResourceState::FailedCleanup, ResourceState::Invalid),
+        (ResourceState::Invalid, ResourceState::PendingCleanup),
+        (ResourceState::Recovering, ResourceState::Active),
+        (ResourceState::Recovering, ResourceState::FailedCleanup),
+        (ResourceState::Recovering, ResourceState::Invalid),
+    ];
+
+    const ALL_STATES: [ResourceState; 10] = [
+        ResourceState::Uninitialized,
+        ResourceState::Created,
+        ResourceState::Active,
+        ResourceState::Locked,
+        ResourceState::Expired,
+        ResourceState::PendingCleanup,
+        ResourceState::Destroyed,
+        ResourceState::FailedCleanup,
+        ResourceState::Invalid,
+        ResourceState::Recovering,
+    ];
+
+    #[test]
+    fn exhaustive_transition_table() {
+        for from in ALL_STATES {
+            for to in ALL_STATES {
+                let expected = LEGAL.contains(&(from, to));
+                assert_eq!(
+                    from.can_transition_to(to),
+                    expected,
+                    "can_transition_to({from:?} -> {to:?}) flipped"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn try_transition_reports_both_states_in_the_error() {
+        let err = ResourceState::Destroyed
+            .try_transition(ResourceState::Active)
+            .unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("Destroyed"));
+        assert!(rendered.contains("Active"));
+        // terminal means terminal: no way back out of Destroyed
+        for to in ALL_STATES {
+            assert!(!ResourceState::Destroyed.can_transition_to(to));
+        }
+    }
+
+    #[test]
+    fn self_transitions_are_all_rejected() {
+        for state in ALL_STATES {
+            assert!(
+                !state.can_transition_to(state),
+                "{state:?} -> {state:?} should not be a move at all"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_eligibility_covers_every_state() {
+        for state in ALL_STATES {
+            let expected = matches!(
+                state,
+                ResourceState::Expired | ResourceState::PendingCleanup
+            );
+            assert_eq!(state.is_cleanup_eligible(), expected, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn only_destroyed_is_terminal() {
+        for state in ALL_STATES {
+            assert_eq!(
+                state.is_terminal(),
+                state == ResourceState::Destroyed,
+                "{state:?}"
+            );
+        }
+    }
+
     #[test]
     fn happy_path_is_legal() {
         let s = ResourceState::Uninitialized;

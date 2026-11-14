@@ -153,4 +153,133 @@ mod tests {
         let got = reg.get(&id).unwrap();
         assert_eq!(got.state, ResourceState::Created);
     }
+
+    #[test]
+    fn registering_the_same_id_twice_is_rejected() {
+        let reg = Registry::new();
+        let m = meta("a");
+        let id = m.id.clone();
+        reg.register(m).unwrap();
+        let mut dup = meta("b");
+        dup.id = id.clone();
+        assert!(matches!(
+            reg.register(dup),
+            Err(RegistryError::AlreadyRegistered(_))
+        ));
+        // the original record must survive the rejected registration
+        assert_eq!(reg.get(&id).unwrap().namespace, "a");
+        assert_eq!(reg.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn missing_ids_surface_not_found_everywhere() {
+        let reg = Registry::new();
+        let id = ResourceId::new();
+        assert!(matches!(reg.get(&id), Err(RegistryError::NotFound(_))));
+        assert!(matches!(reg.remove(&id), Err(RegistryError::NotFound(_))));
+        assert!(matches!(
+            reg.update(&id, |m| m.size_bytes = 1),
+            Err(RegistryError::NotFound(_))
+        ));
+        assert!(matches!(
+            reg.set_state(&id, ResourceState::Active),
+            Err(RegistryError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn update_applies_the_mutation_and_returns_the_new_snapshot() {
+        let reg = Registry::new();
+        let m = meta("a");
+        let id = m.id.clone();
+        reg.register(m).unwrap();
+        let updated = reg.update(&id, |m| m.size_bytes += 7).unwrap();
+        assert_eq!(updated.size_bytes, 7);
+        assert_eq!(reg.get(&id).unwrap().size_bytes, 7);
+    }
+
+    #[test]
+    fn snapshot_hands_out_copies_not_aliases() {
+        let reg = Registry::new();
+        let m = meta("a");
+        let id = m.id.clone();
+        reg.register(m).unwrap();
+        let mut got = reg.snapshot().unwrap();
+        got[0].name = "tampered".into();
+        // the registry must not observe mutations on handed-out records
+        assert_eq!(reg.get(&id).unwrap().name, "test");
+    }
+
+    #[test]
+    fn snapshot_namespace_filters_and_total_bytes_sums() {
+        let reg = Registry::new();
+        for (ns, bytes) in [("a", 10), ("a", 15), ("b", 100)] {
+            let mut m = meta(ns);
+            m.size_bytes = bytes;
+            reg.register(m).unwrap();
+        }
+        let a = reg.snapshot_namespace("a").unwrap();
+        assert_eq!(a.len(), 2);
+        let b = reg.snapshot_namespace("b").unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(reg.total_bytes().unwrap(), 125);
+    }
+
+    #[test]
+    fn panicking_update_poisons_the_registry() {
+        let reg = Registry::new();
+        let m = meta("a");
+        let id = m.id.clone();
+        reg.register(m).unwrap();
+        // a panicking closure while the registry lock is held poisons it,
+        // and every operation after that must fail with Poisoned
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = reg.update(&id, |_| panic!("boom while holding the lock"));
+        }));
+        assert!(matches!(reg.get(&id), Err(RegistryError::Poisoned)));
+        assert!(matches!(
+            reg.register(meta("b")),
+            Err(RegistryError::Poisoned)
+        ));
+        assert!(matches!(reg.len(), Err(RegistryError::Poisoned)));
+        assert!(matches!(reg.remove(&id), Err(RegistryError::Poisoned)));
+        assert!(matches!(reg.snapshot(), Err(RegistryError::Poisoned)));
+        assert!(matches!(reg.total_bytes(), Err(RegistryError::Poisoned)));
+    }
+
+    #[test]
+    fn concurrent_registrations_and_increments_land_exactly_once() {
+        use std::sync::Arc;
+        let reg = Arc::new(Registry::new());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let reg = Arc::clone(&reg);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..25 {
+                    reg.register(meta("shared")).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(reg.len().unwrap(), 200);
+
+        // concurrent increments through the mutation path must not lose updates
+        let target = reg.snapshot().unwrap().into_iter().next().unwrap().id;
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let reg = Arc::clone(&reg);
+            let target = target.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..25 {
+                    reg.update(&target, |m| m.size_bytes += 1).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(reg.get(&target).unwrap().size_bytes, 200);
+    }
 }

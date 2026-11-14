@@ -93,4 +93,57 @@ mod tests {
         assert!(reg.get("dummy").is_some());
         assert!(reg.get("nope").is_none());
     }
+
+    struct Other;
+    impl ResourceBackend for Other {
+        fn name(&self) -> &str {
+            "other"
+        }
+
+        fn create(&self, _request: &ResourceRequest) -> Result<ResourceMeta> {
+            Ok(ResourceMeta::new(
+                "y",
+                "ns",
+                crate::core::resource::ResourceKind::Custom,
+            ))
+        }
+
+        fn release(&self, _meta: &ResourceMeta) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn names_reports_every_registered_backend() {
+        let reg = BackendRegistry::new();
+        assert!(reg.names().is_empty());
+        reg.register(Arc::new(Dummy)).unwrap();
+        reg.register(Arc::new(Other)).unwrap();
+        // hashmap iteration order is unspecified, so compare sorted
+        let mut names = reg.names();
+        names.sort();
+        assert_eq!(names, vec!["dummy".to_string(), "other".to_string()]);
+        assert_eq!(reg.len(), 2);
+    }
+
+    #[test]
+    fn registering_the_same_name_replaces_the_backend() {
+        let reg = BackendRegistry::new();
+        let first = Arc::new(Dummy);
+        reg.register(Arc::clone(&first) as Arc<dyn ResourceBackend>)
+            .unwrap();
+        let second = Arc::new(Dummy);
+        reg.register(Arc::clone(&second) as Arc<dyn ResourceBackend>)
+            .unwrap();
+        assert_eq!(reg.len(), 1);
+        let looked_up = reg.get("dummy").unwrap();
+        assert!(Arc::ptr_eq(
+            &looked_up,
+            &(second as Arc<dyn ResourceBackend>)
+        ));
+        assert!(!Arc::ptr_eq(
+            &looked_up,
+            &(first as Arc<dyn ResourceBackend>)
+        ));
+    }
 }

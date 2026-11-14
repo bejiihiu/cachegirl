@@ -1593,4 +1593,141 @@ mod tests {
         assert_eq!(manager.registry().len().unwrap(), 0);
         manager.shutdown().unwrap();
     }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn names_of_only_dots_and_trailing_dots_are_rejected() {
+        // "..." and "packet." would alias their dot-stripped counterparts
+        // on windows, so creation must refuse them at the validator
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("names").unwrap();
+
+        for name in ["...", "packet.", ".", "..", "archive.tar."] {
+            assert!(
+                ns.create_file(name).is_err(),
+                "name {name:?} must be rejected"
+            );
+        }
+        assert_eq!(manager.registry().len().unwrap(), 0);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn colon_names_are_rejected() {
+        // ':' names an alternate data stream on NTFS
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("names").unwrap();
+        assert!(ns.create_file("a:b").is_err());
+        assert_eq!(manager.registry().len().unwrap(), 0);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn unicode_names_are_created_on_disk() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("names").unwrap();
+
+        let file = ns.create_file("файл.bin").unwrap();
+        assert!(file.path().is_file());
+        assert!(file.path().ends_with("файл.bin"));
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn ttl_and_idle_ttl_together_are_a_configuration_error() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("ttl-conflict").unwrap();
+
+        let options = CreateOptions::new()
+            .ttl(Duration::from_secs(60))
+            .idle_ttl(Duration::from_secs(60));
+        let result = ns.create_file_with("conflicted.bin", options);
+        assert!(matches!(
+            result,
+            Err(Error::Config(crate::core::error::ConfigError::Invalid(_)))
+        ));
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "cache")]
+    #[test]
+    fn duplicate_cache_key_is_rejected() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("cache").unwrap();
+
+        ns.create_cache_entry("pkt", vec![1, 2, 3]).unwrap();
+        let err = ns.create_cache_entry("pkt", vec![4, 5]);
+        assert!(matches!(
+            err,
+            Err(Error::Backend(
+                crate::core::error::BackendError::Rejected { .. }
+            ))
+        ));
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "cache")]
+    #[test]
+    fn the_same_cache_key_works_in_different_namespaces() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let a = manager.namespace("cache-a").unwrap();
+        let b = manager.namespace("cache-b").unwrap();
+
+        a.create_cache_entry("pkt", vec![1]).unwrap();
+        assert!(b.create_cache_entry("pkt", vec![2]).is_ok());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "cache")]
+    #[test]
+    fn cache_key_can_be_reused_after_release() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("cache").unwrap();
+
+        let first = ns.create_cache_entry("pkt", vec![1]).unwrap();
+        let id = first.id().clone();
+        ns.release(&id).unwrap();
+        // the store slot must be freed together with the registry record,
+        // otherwise the key is burned forever
+        let second = ns.create_cache_entry("pkt", vec![2]).unwrap();
+        assert_ne!(first.id(), second.id());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "cache")]
+    #[test]
+    fn cache_get_refreshes_last_accessed_in_the_registry() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("cache").unwrap();
+
+        let entry = ns.create_cache_entry("pkt", vec![1, 2, 3]).unwrap();
+        let id = entry.id().clone();
+        // rewind the registry record far into the past; anything less
+        // than a cache_get refresh must leave it there
+        let stale = std::time::SystemTime::now() - Duration::from_secs(3600);
+        manager
+            .registry()
+            .update(&id, |m| m.last_accessed = stale)
+            .unwrap();
+
+        let fetched = ns.cache_get("pkt").unwrap().expect("entry must exist");
+        assert!(fetched.last_accessed > stale);
+        // cache_get stamps the entry and the registry record with two
+        // separate clock reads, so they can differ by an epsilon — what
+        // matters is that both moved off the stale value
+        let meta = manager.registry().get(&id).unwrap();
+        assert!(meta.last_accessed > stale);
+        manager.shutdown().unwrap();
+    }
 }

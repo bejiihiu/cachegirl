@@ -30,6 +30,10 @@ pub(crate) fn validate_namespace_name(name: &str) -> Result<(), ConfigError> {
     if name == "." || name == ".." || name.contains(['/', '\\']) {
         return Err(ConfigError::InvalidNamespaceName(name.to_owned()));
     }
+    // windows strips trailing dots, so "ns" and "ns." would alias one dir
+    if name.ends_with('.') {
+        return Err(ConfigError::InvalidNamespaceName(name.to_owned()));
+    }
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -40,17 +44,24 @@ pub(crate) fn validate_namespace_name(name: &str) -> Result<(), ConfigError> {
 }
 
 /// Validate a resource name: non-empty, no traversal, no control characters.
+///
+/// `:` is rejected (on NTFS it silently denotes an alternate data stream)
+/// and names may not end with `.`: Windows strips trailing dots, which
+/// would make `probe` and `probe.` alias the same resource.
 pub(crate) fn validate_resource_name(name: &str) -> Result<(), AccessError> {
     let trimmed = name.trim();
     if trimmed.is_empty()
         || trimmed != name
         || name == "."
         || name == ".."
-        || name.contains(['/', '\\'])
+        || name.contains(['/', '\\', ':'])
     {
         return Err(AccessError::UnsafeName(name.to_owned()));
     }
     if name.chars().any(|c| c.is_control()) {
+        return Err(AccessError::UnsafeName(name.to_owned()));
+    }
+    if name.ends_with('.') {
         return Err(AccessError::UnsafeName(name.to_owned()));
     }
     Ok(())
@@ -262,6 +273,20 @@ mod tests {
         assert!(validate_resource_name("a/b").is_err());
         assert!(validate_resource_name("a\\b").is_err());
         assert!(validate_resource_name("a\u{7}b").is_err());
+    }
+
+    #[test]
+    fn trailing_dots_and_colons_are_rejected() {
+        // windows strips trailing dots (name and name. would alias),
+        // and ':' names an alternate data stream on ntfs
+        assert!(validate_resource_name("probe.").is_err());
+        assert!(validate_resource_name("...").is_err());
+        assert!(validate_resource_name("a:b").is_err());
+        assert!(validate_resource_name("файл.bin").is_ok());
+        assert!(validate_namespace_name("ns.").is_err());
+        assert!(validate_namespace_name("...").is_err());
+        assert!(validate_namespace_name("packets-v2.bin").is_ok());
+        assert!(validate_namespace_name(".hidden").is_ok());
     }
 
     #[test]

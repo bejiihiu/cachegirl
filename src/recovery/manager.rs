@@ -1011,4 +1011,195 @@ mod tests {
         let parsed = parse_lock("pid=7\ncreated=banana\nstart=\n", Path::new("lock")).unwrap();
         assert_eq!(parsed.start, None);
     }
+
+    #[test]
+    fn parse_lock_rejects_pid_out_of_range() {
+        // u32::MAX + 1 does not fit the type at all
+        assert!(parse_lock("pid=4294967296\n", Path::new("lock")).is_err());
+        assert!(parse_lock("pid=-1\n", Path::new("lock")).is_err());
+    }
+
+    #[test]
+    fn parse_lock_keys_are_case_sensitive() {
+        // "PID" is an unknown key to this parser, so the lock counts as
+        // pid-less and must never be reclaimed
+        assert!(parse_lock("PID=42\n", Path::new("lock")).is_err());
+    }
+
+    #[test]
+    fn parse_lock_trims_padding_around_key_and_value() {
+        let parsed = parse_lock("pid = 42 \ninstance = i-9\n", Path::new("lock")).unwrap();
+        assert_eq!(parsed.pid, 42);
+        assert_eq!(parsed.instance.as_deref(), Some("i-9"));
+    }
+
+    #[test]
+    fn parse_lock_last_duplicate_key_wins() {
+        let parsed = parse_lock("pid=1\npid=2\n", Path::new("lock")).unwrap();
+        assert_eq!(parsed.pid, 2);
+    }
+
+    #[test]
+    fn parse_lock_keeps_equals_signs_inside_values() {
+        let parsed = parse_lock("pid=7\nstart=windows:a=b=c\n", Path::new("lock")).unwrap();
+        assert_eq!(parsed.start.as_deref(), Some("windows:a=b=c"));
+    }
+
+    #[test]
+    fn parse_lock_treats_empty_optional_values_as_absent() {
+        let parsed = parse_lock("pid=7\ninstance=\nstart=\n", Path::new("lock")).unwrap();
+        assert_eq!(parsed.instance, None);
+        assert_eq!(parsed.start, None);
+    }
+
+    #[test]
+    fn read_lock_reports_a_missing_file() {
+        let root = test_root();
+        let dir = root.path().join("instance-x");
+        fs::create_dir_all(&dir).unwrap();
+        match read_lock(&dir) {
+            Err(RecoveryError::CorruptLock { reason, .. }) => {
+                assert!(reason.contains("missing"));
+            }
+            other => panic!("expected CorruptLock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_lock_rejects_an_oversized_file() {
+        let root = test_root();
+        let dir = root.path().join("instance-huge");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(LOCK_FILE),
+            vec![b'x'; (LOCK_MAX_BYTES + 1) as usize],
+        )
+        .unwrap();
+        match read_lock(&dir) {
+            Err(RecoveryError::CorruptLock { reason, .. }) => {
+                assert!(reason.contains("expected at most"));
+            }
+            other => panic!("expected CorruptLock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_lock_rejects_non_utf8_content() {
+        let root = test_root();
+        let dir = root.path().join("instance-binary");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(LOCK_FILE), [0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe]).unwrap();
+        match read_lock(&dir) {
+            Err(RecoveryError::CorruptLock { reason, .. }) => {
+                assert!(reason.contains("UTF-8"));
+            }
+            other => panic!("expected CorruptLock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_locked_flags_a_reused_pid_with_a_stale_token() {
+        // pid is us (certainly alive), the recorded token belongs to a
+        // lifetime that is over: the pid must have been recycled
+        let contents = LockContents {
+            pid: std::process::id(),
+            instance: None,
+            start: Some("the-previous-life-of-this-pid".into()),
+        };
+        assert!(matches!(
+            decide_locked(&contents, "whatever"),
+            Verdict::Stale(_)
+        ));
+    }
+
+    #[test]
+    fn decide_locked_keeps_a_live_pid_with_a_matching_token() {
+        let token = process::current_start_token()
+            .expect("current process must have a lifetime token on this platform");
+        let contents = LockContents {
+            pid: std::process::id(),
+            instance: Some("instance-x".into()),
+            start: Some(token),
+        };
+        assert!(matches!(
+            decide_locked(&contents, "instance-x"),
+            Verdict::Alive(_)
+        ));
+    }
+
+    #[test]
+    fn decide_locked_keeps_a_live_pid_without_any_token() {
+        // legacy locks carry no token; liveness alone protects the directory
+        let contents = LockContents {
+            pid: std::process::id(),
+            instance: None,
+            start: None,
+        };
+        assert!(matches!(
+            decide_locked(&contents, "whatever"),
+            Verdict::Alive(_)
+        ));
+    }
+
+    #[test]
+    fn decide_locked_leaves_a_misplaced_lock_alone() {
+        let contents = LockContents {
+            pid: ABSURD_PID,
+            instance: Some("instance-a".into()),
+            start: None,
+        };
+        match decide_locked(&contents, "instance-b") {
+            Verdict::Unknown(reason) => assert!(reason.contains("not touching")),
+            other => panic!("expected Verdict::Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_lock_path_that_is_a_directory_is_never_reclaimed() {
+        let root = test_root();
+        let dir = root.path().join("instance-oddball");
+        // "lock file exists but is not a regular file" must surface as
+        // Skipped, never as a deletion
+        fs::create_dir_all(dir.join(LOCK_FILE)).unwrap();
+
+        let mgr = RecoveryManager::new(root.path());
+        let report = mgr
+            .recover(RecoveryPolicy::OnStartup, "instance-current")
+            .unwrap();
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(dir.exists());
+    }
+
+    #[test]
+    fn lock_age_is_none_without_a_lock_and_some_with_one() {
+        let root = test_root();
+        assert_eq!(lock_age(root.path()), None);
+        let mgr = RecoveryManager::new(root.path());
+        mgr.write_lock("instance-age-check").unwrap();
+        let age = lock_age(&root.path().join("instance-age-check"));
+        assert!(age.is_some_and(|a| a.as_secs() < 60));
+    }
+
+    #[test]
+    fn recovery_report_display_lists_counts_and_failures() {
+        let report = RecoveryReport {
+            scanned: 4,
+            removed: 1,
+            kept: 2,
+            skipped: 1,
+            failed: 1,
+            bytes_freed: 4096,
+            entries: Vec::new(),
+            failure_reasons: vec!["instance-x: boom".to_string()],
+        };
+        let rendered = report.to_string();
+        assert!(rendered.contains("scanned 4"));
+        assert!(rendered.contains("removed 1"));
+        assert!(rendered.contains("4096 bytes"));
+        assert!(rendered.contains("kept 2"));
+        assert!(rendered.contains("skipped 1"));
+        assert!(rendered.contains("failed 1"));
+        assert!(rendered.contains("instance-x: boom"));
+    }
 }

@@ -195,4 +195,115 @@ mod tests {
         assert_eq!(sink.drain().len(), 1);
         assert!(sink.is_empty());
     }
+
+    #[test]
+    fn drain_preserves_emission_order() {
+        let sink = VecSink::new();
+        let id = ResourceId::new();
+        sink.emit(&Event::ResourceCreated {
+            instance: "i".into(),
+            id: id.clone(),
+            kind: crate::core::resource::ResourceKind::File,
+            namespace: "ns".into(),
+        });
+        sink.emit(&Event::ResourceReleased {
+            instance: "i".into(),
+            id: id.clone(),
+            bytes_freed: 1,
+        });
+        sink.emit(&Event::CleanupCompleted {
+            instance: "i".into(),
+            scanned: 1,
+            removed: 1,
+            failed: 0,
+            bytes_freed: 1,
+        });
+        let drained = sink.drain();
+        assert_eq!(drained.len(), 3);
+        assert!(matches!(drained[0], Event::ResourceCreated { .. }));
+        assert!(matches!(drained[1], Event::ResourceReleased { .. }));
+        assert!(matches!(drained[2], Event::CleanupCompleted { .. }));
+    }
+
+    #[test]
+    fn drain_on_an_empty_sink_yields_nothing() {
+        let sink = VecSink::new();
+        assert!(sink.drain().is_empty());
+        assert_eq!(sink.len(), 0);
+    }
+
+    #[test]
+    fn emit_after_drain_starts_from_a_clean_slate() {
+        let sink = VecSink::new();
+        sink.emit(&Event::ResourceReleased {
+            instance: "i".into(),
+            id: ResourceId::new(),
+            bytes_freed: 1,
+        });
+        let _ = sink.drain();
+        sink.emit(&Event::ResourceReleased {
+            instance: "i".into(),
+            id: ResourceId::new(),
+            bytes_freed: 2,
+        });
+        let drained = sink.drain();
+        assert_eq!(drained.len(), 1);
+        assert!(matches!(
+            drained[0],
+            Event::ResourceReleased { bytes_freed: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn null_sink_swallows_every_event_variant() {
+        let sink = NullSink;
+        let id = ResourceId::new();
+        // none of these may panic; NullSink is the sink for apps that
+        // do not want any observability output
+        sink.emit(&Event::ResourceCreated {
+            instance: "i".into(),
+            id: id.clone(),
+            kind: crate::core::resource::ResourceKind::File,
+            namespace: "ns".into(),
+        });
+        sink.emit(&Event::ResourceReleased {
+            instance: "i".into(),
+            id: id.clone(),
+            bytes_freed: 1,
+        });
+        sink.emit(&Event::CleanupCompleted {
+            instance: "i".into(),
+            scanned: 1,
+            removed: 1,
+            failed: 0,
+            bytes_freed: 1,
+        });
+        sink.emit(&Event::RecoveryCompleted {
+            instance: "i".into(),
+            scanned: 1,
+            removed: 0,
+            kept: 1,
+            failed: 0,
+            bytes_freed: 0,
+        });
+    }
+
+    #[test]
+    fn events_compare_structurally() {
+        let id = ResourceId::new();
+        let make = || Event::ResourceReleased {
+            instance: "i".into(),
+            id: id.clone(),
+            bytes_freed: 10,
+        };
+        assert_eq!(make(), make());
+        assert_ne!(
+            make(),
+            Event::ResourceReleased {
+                instance: "i".into(),
+                id,
+                bytes_freed: 11,
+            }
+        );
+    }
 }

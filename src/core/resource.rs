@@ -251,3 +251,106 @@ impl ResourceMeta {
         self.last_accessed = SystemTime::now();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_ids_are_unique_across_generations() {
+        use std::collections::HashSet;
+        let ids: HashSet<ResourceId> = (0..10_000).map(|_| ResourceId::new()).collect();
+        assert_eq!(ids.len(), 10_000);
+    }
+
+    #[test]
+    fn from_str_rejects_blank_ids() {
+        assert!(ResourceId::from_str("").is_err());
+        assert!(ResourceId::from_str("   ").is_err());
+        assert!(ResourceId::from_str("\t\n ").is_err());
+        // the error is a configuration failure, not a registry panic
+        assert!(matches!(
+            ResourceId::from_str(""),
+            Err(ConfigError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn from_str_preserves_the_exact_string() {
+        // ids are registry keys, not user-facing names: what went in
+        // must come back out, padding included
+        let id = ResourceId::from_str(" res-1 ").unwrap();
+        assert_eq!(id.as_str(), " res-1 ");
+    }
+
+    #[test]
+    fn display_roundtrips_through_from_str() {
+        let id = ResourceId::new();
+        let parsed = ResourceId::from_str(&id.to_string()).unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn ownership_display_covers_every_variant() {
+        let cases = [
+            (Ownership::Owned, "owned"),
+            (Ownership::Managed, "managed"),
+            (Ownership::Shared, "shared"),
+            (Ownership::Leased, "leased"),
+        ];
+        for (mode, expected) in cases {
+            assert_eq!(mode.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn drop_destroys_only_owned_and_shared() {
+        assert!(Ownership::Owned.drop_destroys());
+        assert!(Ownership::Shared.drop_destroys());
+        assert!(!Ownership::Managed.drop_destroys());
+        assert!(!Ownership::Leased.drop_destroys());
+    }
+
+    #[test]
+    fn ownership_default_is_managed() {
+        assert_eq!(Ownership::default(), Ownership::Managed);
+    }
+
+    #[test]
+    fn resource_kind_display_covers_every_variant() {
+        let cases = [
+            (ResourceKind::File, "file"),
+            (ResourceKind::Directory, "directory"),
+            (ResourceKind::Buffer, "buffer"),
+            (ResourceKind::Cache, "cache"),
+            (ResourceKind::Serialization, "serialization"),
+            (ResourceKind::Runtime, "runtime"),
+            (ResourceKind::Custom, "custom"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn fresh_meta_starts_created_and_untracked() {
+        let meta = ResourceMeta::new("name", "ns", ResourceKind::File);
+        assert_eq!(meta.state, ResourceState::Created);
+        assert_eq!(meta.size_bytes, 0);
+        assert_eq!(meta.created_at, meta.last_accessed);
+        assert_eq!(meta.ownership, Ownership::Managed);
+        assert_eq!(meta.priority, crate::policy::Priority::Normal);
+        assert_eq!(meta.cleanup_attempts, 0);
+        assert!(meta.metadata.is_empty());
+        assert!(meta.ttl.is_none());
+        assert!(meta.owner.is_none());
+    }
+
+    #[test]
+    fn record_access_never_moves_the_clock_backwards() {
+        let mut meta = ResourceMeta::new("name", "ns", ResourceKind::File);
+        let before = meta.last_accessed;
+        meta.record_access();
+        assert!(meta.last_accessed >= before);
+    }
+}

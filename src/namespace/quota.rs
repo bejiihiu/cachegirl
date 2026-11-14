@@ -98,4 +98,25 @@ mod tests {
         let q = NamespaceQuota::unlimited();
         assert!(q.check("ns", u64::MAX, u64::MAX, u64::MAX).is_ok());
     }
+
+    #[test]
+    fn boundary_exactly_at_the_limit_passes() {
+        let q = NamespaceQuota::with_max_bytes(100);
+        assert!(q.check("ns", 90, 0, 10).is_ok());
+        assert!(q.check("ns", 100, 0, 0).is_ok());
+        assert!(q.check("ns", 100, 0, 1).is_err());
+
+        let count = NamespaceQuota::with_max_resources(1);
+        assert!(count.check("ns", 0, 0, 0).is_ok()); // one resource fits
+        assert!(count.check("ns", 0, 1, 0).is_err()); // two do not
+    }
+
+    #[test]
+    fn byte_projection_saturates_instead_of_overflowing() {
+        // saturating_add keeps the projection finite; the quota errors out
+        // rather than wrapping into a small number that would look fine
+        let q = NamespaceQuota::with_max_bytes(u64::MAX - 1);
+        assert!(q.check("ns", u64::MAX, 0, 1).is_err());
+        assert!(q.check("ns", u64::MAX - 2, 0, 1).is_ok());
+    }
 }
