@@ -74,7 +74,8 @@
 //! | `tokio`      | no      | Tokio integration; implies `async`                    |
 //!
 //! Guides and recipes live in the `docs/` directory of the repository
-//! (`getting-started`, `configuration`, `namespaces`, `resources`,
+//! (`getting-started`, `core-concepts`, `lifecycle-management`,
+//! `configuration`, `namespaces`, `resources`,
 //! `ownership-and-leases`, `cleanup-policies`, `crash-recovery`,
 //! `scheduler-integration`, `sync-and-async`, `observability`,
 //! `security`, `performance`, `error-handling`, `writing-a-backend`,

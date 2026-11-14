@@ -1,9 +1,12 @@
 //! Two namespaces with two different sets of rules, and full isolation
-//! between them.
+//! between them — plus a nested hierarchy under `network`.
 //!
 //! `network` gets a byte quota and free-form metadata; `protocol` gets a
-//! count quota. Creating, measuring and sweeping on one side is invisible
-//! on the other: a namespace can never touch the resources of another.
+//! count quota. `network/packets` demonstrates nested namespaces: quotas
+//! and cleanup recurse down the subtree, while per-resource operations
+//! stay exact-match. Creating, measuring and sweeping on one branch is
+//! invisible on the other: a namespace can never touch the resources of
+//! another.
 //!
 //! ```sh
 //! cargo run --example namespace
@@ -65,6 +68,49 @@ fn main() -> cachegirl::Result<()> {
         report.scanned, report.removed, report.reasons.size_eviction, report.bytes_freed
     );
     assert_eq!(report.reasons.size_eviction, 1);
+
+    // -- nested namespaces -------------------------------------------------
+    // two ways to reach network/packets: the manager path form and the
+    // child form — they are the same namespace
+    let packets = manager.namespace("network/packets")?;
+    let packets_child = network.namespace("packets")?;
+    assert!(std::sync::Arc::ptr_eq(&packets, &packets_child));
+    println!(
+        "packets: name={} depth={} parent={:?}",
+        packets.name(),
+        packets.depth(),
+        packets.parent()
+    );
+
+    let frame = packets.create_file("frame-1.bin")?;
+    std::fs::write(frame.path(), vec![0xabu8; 512]).expect("frame is writable");
+    packets.refresh_size(frame.id())?;
+
+    // usage() is exact-match; usage_recursive() covers the subtree
+    let (net_bytes, net_count) = network.usage()?;
+    let (tree_bytes, tree_count) = network.usage_recursive()?;
+    let (pkt_bytes, pkt_count) = packets.usage()?;
+    println!(
+        "network exact-match: {net_bytes} bytes / {net_count} resource(s); network subtree: {tree_bytes} bytes / {tree_count} resource(s); packets: {pkt_bytes} bytes / {pkt_count} resource(s)"
+    );
+    assert_eq!(tree_bytes, net_bytes + pkt_bytes);
+
+    // a namespace-scoped sweep on the parent reclaims the subtree too:
+    // give packets an already-expired resource and sweep `network` only
+    packets.create_file_with(
+        "short-lived.bin",
+        cachegirl::CreateOptions::new().ttl(Duration::from_millis(1)),
+    )?;
+    std::thread::sleep(Duration::from_millis(50));
+    let report = network.cleanup_expired()?;
+    println!(
+        "network subtree sweep: scanned {}, removed {} (ttl.fixed={})",
+        report.scanned, report.removed, report.reasons.ttl_fixed
+    );
+    assert_eq!(
+        report.reasons.ttl_fixed, 1,
+        "the parent sweep must reclaim the child's expired resource"
+    );
 
     // -- an anchor resource in network for the isolation check -------------
     let anchor = network.create_file("anchor.bin")?;

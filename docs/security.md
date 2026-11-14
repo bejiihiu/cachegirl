@@ -116,13 +116,22 @@ is strong evidence that a human should look. See
 
 ## Filesystem permissions
 
-On Unix, adopting a directory is ownership-checked: an existing `root`
-(or `root/<instance_id>`) owned by a different user fails the build with
-`ConfigError::DirNotOwned` instead of being adopted and written into.
-Directories the build creates are owned by the current user by
-construction. On Windows this check degrades to existence, because the
-standard library exposes no ownership primitive there — existence is the
-whole check, and the same umask-style caveats apply.
+On Unix, adopting an existing directory is ownership-checked before any
+write: an existing `root` or `root/<instance_id>` owned by a different
+uid fails the build with `ConfigError::DirNotOwned { dir, owner_uid,
+current_uid }` instead of being adopted. Symlinks are judged by their
+target — a link pointing at somebody else's directory is refused. The
+owner is read through `MetadataExt::uid()` (no `unsafe`); the current
+uid is probed via `/proc/self/status` on Linux and `id -u` on other
+Unixes, and if the probe fails the check fails closed (a build that
+cannot verify ownership refuses rather than adopts). Directories the
+build creates are owned by the current user by construction and pass
+without comment. On Windows there is no ownership primitive in the
+standard library, so the check degrades to existence — existence is the
+whole check there, and the same umask-style caveats apply. The gate is
+refuse-before-create, not a race-proof sandbox: a hostile actor with
+write access to the parent can still swap things between the check and
+the first syscall.
 
 The manager never sets, relaxes or audits permissions otherwise: files
 and directories are created with the process's umask, lock files are

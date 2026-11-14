@@ -43,6 +43,8 @@ fn main() -> cachegirl::Result<()> {
         .create_if_missing(true)                     // default true
         .cleanup_on_start(true)                      // default false
         .cleanup_on_shutdown(true)                   // default false
+        .remove_instance_dir_on_shutdown(false)      // default false
+        .shutdown_wait_leases(Duration::from_secs(5)) // default: no wait
         .max_size(1024 * 1024 * 1024)                // default: unlimited
         .max_resources(10_000)                       // default: unlimited
         .default_ttl(Duration::from_secs(3600))      // default: no TTL
@@ -94,11 +96,41 @@ When enabled, `shutdown()` runs one `cleanup_expired()` sweep before
 removing the instance lock file. Shutdown stays safe to call multiple
 times; only the first call sweeps.
 
+### `remove_instance_dir_on_shutdown(bool)` — default `false`
+
+When enabled, `shutdown()` deletes this instance's whole directory
+(`root/<instance>`) after the sweep. The removal is confined: the
+instance directory must canonically resolve strictly inside the
+canonicalized root. A planted symlink at that path, the root itself,
+or anything resolving at or above the root fails the removal with an
+error instead of deleting data — shutdown can never be talked into
+deleting outside the root. Enable this when the instance directory is
+pure scratch and nothing should survive a clean shutdown; leave it off
+when you want crashed-run debris to linger for inspection or when the
+directory is shared with other tooling. Default is off: a clean
+shutdown leaves the (now empty) instance directory behind.
+
+### `shutdown_wait_leases(Duration)` — default `ZERO` (do not wait)
+
+How long `shutdown()` blocks waiting for active leases to drain before
+proceeding. Leases are the library's mechanism for tracking operations
+still in flight: an operation that holds a lease is, by definition, not
+finished. When the timeout is set and leases remain at shutdown time,
+shutdown proceeds anyway once the timeout elapses; whatever still holds
+a lease stays in `PendingCleanup` and shows up in the shutdown report's
+`deferred` count. The library cannot see arbitrary running application
+code — if an operation should be seen by shutdown, it must hold a
+lease (`resource.acquire()`). Set this to slightly longer than your
+longest expected in-flight operation if you want a clean drain; leave it
+at zero for a hard, immediate shutdown.
+
 ### `max_size(u64)` / `max_resources(u64)` — defaults: unlimited
 
-Manager-wide quotas, enforced atomically at creation time (one global
-creation lock keeps the check-and-register pair race-free). Zero is
-rejected as a configuration error. Per-namespace quotas
+Manager-wide quotas, enforced atomically at creation time (a registry
+reservation inserts a placeholder record under the registry lock while
+checking the manager-wide limit and every ancestor namespace's subtree
+total, then publishes it once the backend materializes the resource).
+Zero is rejected as a configuration error. Per-namespace quotas
 (`Namespace::set_quota`) are enforced on top of these. Both are
 saturating: byte accounting never wraps, so `u64::MAX` is "effectively
 forever" without panicking.
@@ -187,10 +219,12 @@ With the `serde` feature, `ManagerConfig` derives `Serialize`/`Deserialize`
 as a flat object; `PathBuf` fields are strings (so paths must be UTF-8 to
 roundtrip) and missing fields with a default are filled in —
 `create_if_missing` (true), `cleanup_on_start`/`cleanup_on_shutdown`
-(false), `symlink_policy`, `recovery_policy` and `stale_instance_after`
-(1 hour). `root` and `instance_id` are required. Unknown fields are
-ignored. This makes it straightforward to persist a generated config for
-a "write the effective configuration to disk at startup" audit log.
+(false), `remove_instance_dir_on_shutdown` (false),
+`shutdown_wait_leases` (zero), `symlink_policy`, `recovery_policy` and
+`stale_instance_after` (1 hour). `root` and `instance_id` are required.
+Unknown fields are ignored. This makes it straightforward to persist a
+generated config for a "write the effective configuration to disk at
+startup" audit log.
 
 ## Checking what you built
 
@@ -205,8 +239,15 @@ re-exports.
 - `default_ttl` interacts with `cleanup_on_shutdown(true)`: a shutdown
   sweep only removes what has already outlived its TTL.
 - `max_size` / `max_resources` bound the manager; `Namespace::set_quota`
-  bounds one namespace; both must pass at creation. Eviction during a
-  cleanup pass considers policy quotas, namespace quotas and manager
-  quotas (see the cleanup pipeline in [cleanup-policies.md](cleanup-policies.md)).
+  bounds one namespace and its descendants; both must pass at creation.
+  Eviction during a cleanup pass considers policy quotas, namespace
+  quotas and manager quotas (see the cleanup pipeline in
+  [cleanup-policies.md](cleanup-policies.md)).
+- `remove_instance_dir_on_shutdown(true)` only makes sense together with
+  `cleanup_on_shutdown(true)` — the sweep runs first, the directory
+  removal second, so the removal happens on a reclaimed tree.
+- `shutdown_wait_leases` only waits for leases the application itself
+  holds; it does not wait for background work the library does not
+  spawn (there is none).
 - `symlink_policy` only affects the filesystem backend; custom backends
   make their own confinement decisions.

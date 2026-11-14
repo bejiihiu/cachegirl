@@ -177,6 +177,8 @@ mod snippet_configuration_1 {
             .create_if_missing(true) // default true
             .cleanup_on_start(true) // default false
             .cleanup_on_shutdown(true) // default false
+            .remove_instance_dir_on_shutdown(false) // default false
+            .shutdown_wait_leases(Duration::from_secs(5)) // default: no wait
             .max_size(1024 * 1024 * 1024) // default: unlimited
             .max_resources(10_000) // default: unlimited
             .default_ttl(Duration::from_secs(3600)) // default: no TTL
@@ -985,4 +987,88 @@ mod snippet_writing_a_backend_1 {
 #[test]
 fn snippet_writing_a_backend_1() {
     snippet_writing_a_backend_1::main().expect("snippet failed");
+}
+
+mod snippet_core_concepts_1 {
+    use cachegirl::TempManager;
+
+    pub fn main() -> cachegirl::Result<()> {
+        let dir = std::env::temp_dir().join(format!("cachegirl-model-{}", std::process::id()));
+        let manager = TempManager::builder().root(&dir).build()?;
+
+        let scratch = manager.namespace("scratch")?; // logical boundary
+        let file = scratch.create_file("packet.bin")?; // a resource in it
+
+        println!("{} -> {}", file.id(), file.path().display());
+
+        scratch.release(file.id())?; // reclaim it
+        manager.shutdown()?;
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+}
+
+#[test]
+fn snippet_core_concepts_1() {
+    snippet_core_concepts_1::main().expect("snippet failed");
+}
+
+mod snippet_lifecycle_management_1 {
+    use cachegirl::{ResourceState, TempManager};
+
+    pub fn main() -> cachegirl::Result<()> {
+        let dir = std::env::temp_dir().join(format!("cachegirl-state-{}", std::process::id()));
+        let manager = TempManager::builder().root(&dir).build()?;
+        let ns = manager.namespace("demo")?;
+        let file = ns.create_file("state.bin")?;
+
+        let meta = manager.registry().get(file.id())?;
+        println!("state: {:?}", meta.state);
+        println!("cleanup-eligible: {}", meta.state.is_cleanup_eligible());
+        println!("terminal:         {}", meta.state.is_terminal());
+        println!(
+            "Created -> Active is legal: {}",
+            ResourceState::Created.can_transition_to(ResourceState::Active)
+        );
+
+        ns.release(file.id())?;
+        manager.shutdown()?;
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+}
+
+#[test]
+fn snippet_lifecycle_management_1() {
+    snippet_lifecycle_management_1::main().expect("snippet failed");
+}
+
+mod snippet_namespaces_4 {
+    use cachegirl::TempManager;
+
+    pub fn main() -> cachegirl::Result<()> {
+        let dir = std::env::temp_dir().join(format!("cachegirl-nested-{}", std::process::id()));
+        let manager = TempManager::builder().root(&dir).build()?;
+
+        let packets = manager.namespace("network/packets")?; // manager path form
+        let parent = manager.namespace("network")?;
+        let again = parent.namespace("packets")?; // child form — same namespace
+        assert!(std::sync::Arc::ptr_eq(&packets, &again));
+
+        println!(
+            "name={} depth={} parent={:?}",
+            packets.name(),
+            packets.depth(),
+            packets.parent()
+        );
+
+        manager.shutdown()?;
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+}
+
+#[test]
+fn snippet_namespaces_4() {
+    snippet_namespaces_4::main().expect("snippet failed");
 }

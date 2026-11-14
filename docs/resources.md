@@ -271,9 +271,11 @@ contract between the manager and custom backends is described in
 Every record moves through `ResourceState`: `Created`/`Active`/`Locked`
 at creation and use, `Expired` when a TTL lapses or eviction nominates
 it, `PendingCleanup` when destruction was requested but leases held,
-`Destroyed` after the physical removal (the record is removed, not
-marked), `FailedCleanup` when removal failed (retried with a budget of
-`MAX_CLEANUP_ATTEMPTS`). Most applications never see states directly;
-they surface in `ResourceMeta::state`, reports and statistics
-(`expired`, `pending_cleanup`). The state machine rejects illegal
-transitions with `RegistryError::InvalidTransition`.
+`Destroyed` after the physical removal (the record is removed from the
+registry, not marked), `FailedCleanup` when removal failed (retried
+with a budget of `MAX_CLEANUP_ATTEMPTS`). Most applications never see
+states directly; they surface in `ResourceMeta::state`, reports and
+statistics (`expired`, `pending_cleanup`). The state machine rejects
+illegal transitions with `RegistryError::InvalidTransition`. The full
+guide — transition table, who transitions what, `is_cleanup_eligible` —
+is [lifecycle-management.md](lifecycle-management.md).
