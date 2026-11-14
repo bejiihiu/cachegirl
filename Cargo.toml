@@ -20,7 +20,9 @@ autobenches = false
 default = ["filesystem"]
 filesystem = []
 memory = []
-cache = []
+# cache entries are accounted through the memory backend, so the feature
+# implies it instead of failing at creation time
+cache = ["memory"]
 async = []
 sync = []
 serde = ["dep:serde"]

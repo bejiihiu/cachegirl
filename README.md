@@ -48,7 +48,7 @@
 | ------------ | ------- | ------------------------------------------- |
 | `filesystem` | yes     | filesystem backend and file resources       |
 | `memory`     | no      | memory backend and buffer resources         |
-| `cache`      | no      | cache entry resources                       |
+| `cache`      | no      | cache entry resources (implies `memory`)     |
 | `async`      | no      | async API facade, runtime-agnostic          |
 | `sync`       | no      | sync API markers                            |
 | `serde`      | no      | `Serialize`/`Deserialize` for public types  |

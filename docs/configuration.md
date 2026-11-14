@@ -13,7 +13,7 @@ Features are additive. The default build enables only `filesystem`.
 | ------------ | ------- | ---------------------------------------------------------------------- |
 | `filesystem` | yes     | filesystem backend, file and directory resources, startup recovery     |
 | `memory`     | no      | memory backend, buffer / serialization / runtime resources              |
-| `cache`      | no      | cache entry resources (requires `memory` for the backing backend)      |
+| `cache`      | no      | cache entry resources (implies `memory` for the backing backend)   |
 | `async`      | no      | async facade (`AsyncTempManager`, runtime-agnostic)                    |
 | `sync`       | no      | reserved marker; the sync API is always available                      |
 | `serde`      | no      | `Serialize`/`Deserialize` for data-shaped public types                 |
@@ -21,8 +21,9 @@ Features are additive. The default build enables only `filesystem`.
 | `tracing`    | no      | spans and structured events through `tracing`                          |
 | `tokio`      | no      | Tokio integration: blocking operations on the blocking pool; implies `async` |
 
-`cache` entries are accounted through the memory backend, so build with
-`--features cache,memory` (or `--all-features`) to create cache entries.
+`cache` entries are accounted through the memory backend, which the
+`cache` feature implies — build with `--features cache` (or
+`--all-features`) to create cache entries.
 
 ## Builder reference
 

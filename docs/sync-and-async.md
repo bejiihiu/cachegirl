@@ -139,7 +139,7 @@ adapter, not a wall.
 | ------- | ------- | -------- | ------- |
 | `filesystem` | yes | — | filesystem backend, file/directory resources, recovery |
 | `memory` | no | — | memory backend, buffer/serialization/runtime resources |
-| `cache` | no | — | cache entry resources (creation requires `memory`) |
+| `cache` | no | `memory` | cache entry resources |
 | `async` | no | — | the async facade, runtime-agnostic |
 | `sync` | no | — | reserved marker; sync API is always available |
 | `tokio` | no | `tokio`, `async` | blocking operations on the blocking pool |
