@@ -11,6 +11,7 @@ keywords = ["cache", "temporary", "tempfile", "cleanup", "resources"]
 categories = ["caching", "filesystem", "memory-management", "concurrency", "os"]
 readme = "README.md"
 exclude = ["IDEA.md", "notes.md"]
+autobenches = false
 
 [features]
 default = ["filesystem"]
@@ -51,6 +52,26 @@ proptest = { version = "1.11.0", default-features = false, features = ["alloc", 
 [[example]]
 name = "async_usage"
 required-features = ["tokio"]
+
+[[bench]]
+name = "allocation"
+harness = false
+
+[[bench]]
+name = "cleanup"
+harness = false
+
+[[bench]]
+name = "concurrent"
+harness = false
+
+[[bench]]
+name = "cache"
+harness = false
+
+[[bench]]
+name = "registry"
+harness = false
 
 [[example]]
 name = "tracing_usage"
