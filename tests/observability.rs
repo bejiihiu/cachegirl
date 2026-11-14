@@ -392,6 +392,24 @@ mod tracing_tests {
         spans: Arc<Mutex<Vec<String>>>,
     }
 
+    // thread-local subscribers lose the callsite interest race: the first
+    // thread in the process to hit a `debug!` callsite caches `never`, and
+    // the capture layer then never sees that event again. one global capture
+    // subscriber installed once per process avoids the race entirely.
+    static CAPTURE: std::sync::OnceLock<CaptureLayer> = std::sync::OnceLock::new();
+
+    fn global_capture() -> &'static CaptureLayer {
+        CAPTURE.get_or_init(|| {
+            let capture = CaptureLayer::new();
+            let subscriber = tracing_subscriber::registry()
+                .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+                .with(capture.clone());
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("the capture subscriber can only be installed once");
+            capture
+        })
+    }
+
     impl CaptureLayer {
         fn new() -> Self {
             Self {
@@ -459,15 +477,15 @@ mod tracing_tests {
         }
     }
 
+    // one test, two scenarios, sequential: the global capture is shared
+    // with every other test in this binary, so splitting the scenarios
+    // into two tests would let them drain each other's events
     #[test]
-    fn creation_release_and_cleanup_are_traced() {
-        let capture = CaptureLayer::new();
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
-            .with(capture.clone());
+    fn tracing_events_are_captured_on_key_paths() {
+        let capture = global_capture();
 
         let dir = unique_dir("traced");
-        tracing::subscriber::with_default(subscriber, || {
+        {
             let manager = cachegirl::TempManager::builder()
                 .root(&dir)
                 .instance_id("instance-tracing-paths")
@@ -481,7 +499,7 @@ mod tracing_tests {
             ns.release(&id).unwrap();
             manager.cleanup_expired().unwrap();
             manager.shutdown().unwrap();
-        });
+        }
 
         let (events, spans) = capture.take();
         let messages: Vec<&str> = events.iter().map(|e| e.message.as_str()).collect();
@@ -544,20 +562,11 @@ mod tracing_tests {
             cleanup.fields
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn quota_rejection_is_logged_as_warning() {
-        let capture = CaptureLayer::new();
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
-            .with(capture.clone());
-
-        let dir = unique_dir("traced-quota");
-        tracing::subscriber::with_default(subscriber, || {
+        // quota rejection must surface as a WARN with the namespace in fields
+        let quota_dir = unique_dir("traced-quota");
+        {
             let manager = cachegirl::TempManager::builder()
-                .root(&dir)
+                .root(&quota_dir)
                 .instance_id("instance-tracing-quota")
                 .build()
                 .unwrap();
@@ -567,10 +576,10 @@ mod tracing_tests {
             let rejected = ns.create_file("two.bin");
             assert!(rejected.is_err());
             manager.shutdown().unwrap();
-        });
+        }
 
-        let (events, _spans) = capture.take();
-        let warning = events
+        let (quota_events, _) = capture.take();
+        let warning = quota_events
             .iter()
             .find(|e| e.message.contains("quota rejected"))
             .expect("a quota warning must be emitted");
@@ -581,6 +590,6 @@ mod tracing_tests {
             warning.fields
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&quota_dir);
     }
 }
