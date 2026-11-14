@@ -12,7 +12,7 @@ each. Everything in these guides compiles against the published API.
 | [getting-started.md](getting-started.md) | installation, first manager, first namespace and file, explicit cleanup, shutdown |
 | [configuration.md](configuration.md) | every builder knob: root, quotas, TTL, symlink policy, instance id, recovery, event sink, cleanup policies; the feature-flag matrix |
 | [namespaces.md](namespaces.md) | model, creation, name rules, per-namespace quotas and metadata, `usage()`, namespace-scoped cleanup |
-| [resources.md](resources.md) | the seven resource kinds, handles, `CreateOptions`, paths and sizes, `refresh_size`, `cache_get` |
+| [resources.md](resources.md) | the seven resource kinds, handles, `CreateOptions`, paths and sizes, `refresh_size`, pooled buffers, `cache_get` |
 | [ownership-and-leases.md](ownership-and-leases.md) | `Owned` / `Shared` / `Managed` / `Leased`, the lease gate, `PendingCleanup`, `active_leases`, panic safety, drop in async code |
 | [cleanup-policies.md](cleanup-policies.md) | TTL (`Fixed`/`Idle`), quotas, eviction order and priority, custom policies, `CleanupReport`, `MAX_CLEANUP_ATTEMPTS` |
 | [crash-recovery.md](crash-recovery.md) | instance directories, lock file format, staleness decision table, PID reuse, `ReportOnly`, incident checklist |

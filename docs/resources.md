@@ -14,7 +14,7 @@ materializes and destroys them.
 | `File`         | `FileResource`          | `filesystem` | `filesystem` (default) | no — track via `refresh_size` |
 | `Directory`    | `DirectoryResource`     | `filesystem` | `filesystem` (default) | no — `refresh_size`      |
 | `Buffer`       | `BufferResource`        | `memory`     | `memory`     | yes (capacity)          |
-| `Cache`        | `CacheEntryResource`    | `memory`     | `cache` + `memory` | yes                  |
+| `Cache`        | `CacheEntryResource`    | `memory`     | `cache` (implies `memory`) | yes                  |
 | `Serialization`| `SerializationResource` | `memory`     | `memory`     | yes                     |
 | `Runtime`      | `RuntimeResource`       | `memory`     | `memory`     | no (zero)               |
 | `Custom`       | `CustomResource`        | your backend | —            | as reported by backend  |
@@ -56,7 +56,7 @@ fn main() -> cachegirl::Result<()> {
 }
 ```
 
-With `--features cache,memory` all of the in-memory kinds are available:
+With `--features cache` (which implies `memory`) all of the in-memory kinds are available:
 
 ```rust
 use cachegirl::CreateOptions;
@@ -89,8 +89,8 @@ fn main() -> cachegirl::Result<()> {
 }
 ```
 
-This second snippet requires the `cache` and `memory` features; the
-first one is default-feature clean.
+This second snippet requires the `cache` feature (which implies
+`memory`); the first one is default-feature clean.
 
 ## CreateOptions
 
@@ -158,14 +158,57 @@ fn main() -> cachegirl::Result<()> {
   is the accounted size). Files are registered with `size_bytes = 0`;
   call `refresh_size(id)` to sync with `fs::metadata`. Cleanup reports
   and quota eviction use the recorded size, so an unsynced file is
-  accounted as zero bytes.
+  accounted as zero bytes. `refresh_size` is observational: a resource
+  that grew past its quota re-stats successfully and stays tracked; it
+  is reclaimed by quota eviction on a later cleanup pass, not by this
+  call.
 - `refresh_size` is a `stat` syscall; it is cheap but not free. Do not
   call it in a tight loop, and do not call it from async code
   expecting non-blocking behavior — use the async facade, which puts it
   on the blocking pool.
-- `ResourceHandle` (exported for low-level registry bookkeeping) drops
-  the registry record on drop but never touches the filesystem — the
-  physical side is always the backend's job.
+- Files and directories are owned by the concrete RAII handles
+  (`FileResource`, `DirectoryResource`, and their memory-backed
+  siblings); dropping the last owning handle releases the resource
+  according to its `Ownership` mode.
+
+## Pooled buffers
+
+`BufferPool` (with the `memory` feature) recycles buffer allocations for
+hot paths: `acquire` takes a cleared buffer out of the pool, and dropping
+the returned `PooledBuffer` hands the allocation back for the next
+checkout. Buffers that outgrew `max_buffer_capacity`, or buffers arriving
+at a full pool, are dropped instead of retained. `BufferPool::new()`
+keeps 64 buffers of at most 1 MiB each; `with_limits(max_buffers,
+max_buffer_capacity)` tunes both knobs. Both limits accept zero — a pool
+with `max_buffers == 0` never retains anything. `acquire_with_capacity`
+hands out the smallest buffer that fits the request; with nothing
+fitting, the smallest idle buffer is grown rather than stranded.
+
+```rust
+use cachegirl::BufferPool;
+
+fn main() -> cachegirl::Result<()> {
+    let pool = BufferPool::with_limits(16, 64 * 1024);
+    {
+        let mut buf = pool.acquire_with_capacity(4096);
+        buf.extend_from_slice(b"reusable scratch space");
+        assert!(buf.capacity() >= 4096);
+        // dropping the handle returns the allocation to the pool
+    }
+    let reused = pool.acquire();
+    assert!(reused.capacity() >= 4096);
+    Ok(())
+}
+```
+
+A pool is deliberately not tied to a namespace, a manager or the quota
+system: pooled buffers are not registered resources, and routing them
+through quotas would either permanently consume the quota the pool itself
+sits on, or require quota-release plumbing on a `Drop` that cannot report
+failure. If you need accounted, policy-managed buffers, use
+`create_buffer`; the pool is its unaccounted sibling for scratch space
+that never escapes the hot path. The pool is `Send`/`Sync` and safe to
+share across threads; cloning it clones an `Arc` to the same arena.
 
 ## cache_get
 
@@ -204,7 +247,7 @@ fn main() -> cachegirl::Result<()> {
 ```
 
 Like the previous in-memory snippet, this one requires `--features
-cache,memory`.
+cache` (which implies `memory`).
 
 ## Runtime resources
 

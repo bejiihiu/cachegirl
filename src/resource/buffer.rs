@@ -72,6 +72,12 @@ impl Buffer {
     pub fn into_inner(self) -> Vec<u8> {
         self.data
     }
+
+    /// Grow to at least `capacity` bytes. Used by the pool when the
+    /// smallest idle buffer is smaller than the request.
+    pub(crate) fn reserve_exact(&mut self, capacity: usize) {
+        self.data.reserve_exact(capacity);
+    }
 }
 
 impl AsRef<[u8]> for Buffer {

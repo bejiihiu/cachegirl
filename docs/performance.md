@@ -66,10 +66,12 @@ Reading them:
 
 **Buffer reuse over churn.** `create_buffer` pre-allocates capacity
 and accounts it; a hot path that creates and drops 64 KiB buffers at a
-high rate should instead hold one buffer per worker and `clear()` +
-rewind it. The accounting model still tracks the resource; you just
-stop paying allocation and quota churn. This is the single biggest
-lever on memory-bound workloads.
+high rate should instead pool them: `BufferPool::acquire` keeps a fixed
+set of allocations in circulation (checkout/return, no registry
+bookkeeping at all), or hold one buffer per worker and `clear()` +
+rewind it. Pooled buffers are unaccounted scratch space — accounting
+still applies to tracked resources created through the namespace API.
+Buffer churn is the single biggest lever on memory-bound workloads.
 
 **`refresh_size` deliberately.** Call it after you know the file
 changed (finish of a write), not on read. It is the only O(stat) call

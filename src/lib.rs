@@ -65,7 +65,7 @@
 //! | ------------ | ------- | ----------------------------------------------------- |
 //! | `filesystem` | yes     | filesystem backend, file/directory resources, recovery |
 //! | `memory`     | no      | memory backend, buffer/serialization/runtime resources |
-//! | `cache`      | no      | cache entry resources (creation requires `memory`)    |
+//! | `cache`      | no      | cache entry resources (implies `memory`)              |
 //! | `async`      | no      | async facade (`AsyncTempManager`), runtime-agnostic   |
 //! | `sync`       | no      | reserved marker; the sync API is always available     |
 //! | `serde`      | no      | `Serialize`/`Deserialize` for data-shaped types       |
@@ -153,8 +153,10 @@ pub use recovery::{
 };
 #[cfg(feature = "cache")]
 pub use resource::CacheEntryResource;
+pub use resource::CustomResource;
 #[cfg(feature = "memory")]
-pub use resource::{BufferResource, RuntimeResource, SerializationResource};
-pub use resource::{CustomResource, ResourceHandle};
+pub use resource::{
+    BufferPool, BufferResource, PooledBuffer, RuntimeResource, SerializationResource,
+};
 #[cfg(feature = "filesystem")]
 pub use resource::{DirectoryResource, FileResource};

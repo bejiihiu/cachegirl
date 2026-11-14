@@ -709,6 +709,28 @@ fn snippet_resources_4() {
     snippet_resources_4::main().expect("snippet failed");
 }
 
+mod snippet_resources_5 {
+    use cachegirl::BufferPool;
+
+    pub fn main() -> cachegirl::Result<()> {
+        let pool = BufferPool::with_limits(16, 64 * 1024);
+        {
+            let mut buf = pool.acquire_with_capacity(4096);
+            buf.extend_from_slice(b"reusable scratch space");
+            assert!(buf.capacity() >= 4096);
+            // dropping the handle returns the allocation to the pool
+        }
+        let reused = pool.acquire();
+        assert!(reused.capacity() >= 4096);
+        Ok(())
+    }
+}
+
+#[test]
+fn snippet_resources_5() {
+    snippet_resources_5::main().expect("snippet failed");
+}
+
 mod snippet_scheduler_integration_1 {
     use cachegirl::{CreateOptions, TempManager};
     use std::time::Duration;
