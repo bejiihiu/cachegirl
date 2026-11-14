@@ -31,13 +31,16 @@ pub struct RemovalReasons {
 
 impl RemovalReasons {
     /// Total destructions attributed to a cause, excluding deferrals.
+    ///
+    /// Saturates at `u64::MAX` instead of overflowing on fabricated
+    /// out-of-range counts.
     pub fn destroyed(&self) -> u64 {
         self.ttl_fixed
-            + self.ttl_idle
-            + self.size_eviction
-            + self.count_eviction
-            + self.policy
-            + self.eligible
+            .saturating_add(self.ttl_idle)
+            .saturating_add(self.size_eviction)
+            .saturating_add(self.count_eviction)
+            .saturating_add(self.policy)
+            .saturating_add(self.eligible)
     }
 
     /// True when nothing was removed and nothing was deferred.
@@ -149,6 +152,17 @@ mod tests {
             eligible: 64,
         };
         assert_eq!(reasons.destroyed(), 95);
+    }
+
+    #[test]
+    fn destroyed_saturates_instead_of_overflowing() {
+        let reasons = RemovalReasons {
+            ttl_fixed: u64::MAX,
+            ttl_idle: u64::MAX,
+            policy: u64::MAX,
+            ..RemovalReasons::default()
+        };
+        assert_eq!(reasons.destroyed(), u64::MAX);
     }
 
     #[test]
