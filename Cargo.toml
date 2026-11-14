@@ -7,10 +7,11 @@ description = "Centralized management of temporary resources in Rust: files, buf
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/bejiihiu/cachegirl"
 repository = "https://github.com/bejiihiu/cachegirl"
+documentation = "https://docs.rs/cachegirl"
 keywords = ["cache", "temporary", "tempfile", "cleanup", "resources"]
-categories = ["caching", "filesystem", "memory-management", "concurrency", "os"]
+categories = ["caching", "filesystem", "memory-management", "concurrency", "rust-patterns"]
 readme = "README.md"
-exclude = ["IDEA.md", "notes.md"]
+exclude = ["IDEA.md", "notes.md", ".github/"]
 autobenches = false
 
 [features]
