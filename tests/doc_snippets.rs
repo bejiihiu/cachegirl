@@ -2,6 +2,13 @@
 //! public API. Kept in sync with the guides; if a snippet changes in a
 //! guide, change it here in the same commit.
 
+// сниппеты используют сразу несколько необязательных частей API — файловые операции, буферы, кэш и async façade
+#![cfg(all(
+    feature = "filesystem",
+    feature = "memory",
+    feature = "cache",
+    feature = "async",
+))]
 #![allow(dead_code, unused_imports)]
 
 mod snippet_cleanup_policies_1 {

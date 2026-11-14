@@ -8,6 +8,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[allow(unused_imports)]
 use common::{BenchConfig, TempRoot, bench, print_platform};
 
 #[cfg(feature = "cache")]
@@ -43,6 +44,7 @@ fn bench_cache_churn(root: &std::path::Path) {
 
 fn main() {
     print_platform();
+    #[allow(unused_variables)]
     let root = TempRoot::new("cache");
 
     #[cfg(feature = "cache")]

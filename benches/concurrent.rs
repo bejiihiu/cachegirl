@@ -9,6 +9,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[allow(unused_imports)]
 use common::{BenchConfig, TempRoot, bench, print_platform};
 
 #[cfg(feature = "memory")]
@@ -51,6 +52,7 @@ fn bench_concurrent_buffers(root: &std::path::Path) {
 
 fn main() {
     print_platform();
+    #[allow(unused_variables)]
     let root = TempRoot::new("concurrent");
 
     #[cfg(feature = "memory")]

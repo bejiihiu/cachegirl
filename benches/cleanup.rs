@@ -8,6 +8,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[allow(unused_imports)]
 use common::{BenchConfig, TempRoot, bench_setup, print_platform};
 
 #[cfg(feature = "memory")]
@@ -65,6 +66,7 @@ fn run_tier(root: &std::path::Path, n: usize, warmup: usize, rounds: usize) {
 
 fn main() {
     print_platform();
+    #[allow(unused_variables)]
     let root = TempRoot::new("cleanup");
 
     #[cfg(feature = "memory")]

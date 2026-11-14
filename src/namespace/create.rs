@@ -614,10 +614,15 @@ fn anonymous_name(prefix: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::error::Error;
+    // без файловой/memory-фичи все тесты, которым нужны эти имена, отключены
+    #[allow(unused_imports)]
     use crate::core::lifecycle::ResourceState;
     use crate::core::manager::TempManager;
+    #[allow(unused_imports)]
     use crate::core::resource::ResourceKind;
+    #[allow(unused_imports)]
     use crate::observability::{Event, VecSink};
+    #[allow(unused_imports)]
     use core::time::Duration;
     use std::sync::Arc;
 

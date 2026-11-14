@@ -17,11 +17,15 @@ use core::time::Duration;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use cachegirl::backend::ResourceBackend;
 use cachegirl::{
-    AccessError, BackendError, CleanupPolicy, ConfigError, Error, Priority, Quota, Registry,
-    ResourceKind, ResourceMeta, ResourceState, TempManager, Ttl,
+    CleanupPolicy, ConfigError, Error, Priority, Quota, Registry, ResourceKind, ResourceMeta,
+    ResourceState, TempManager, Ttl,
 };
+// часть имён используется только в filesystem-тестах
+#[cfg(feature = "filesystem")]
+use cachegirl::backend::ResourceBackend;
+#[cfg(feature = "filesystem")]
+use cachegirl::{AccessError, BackendError};
 use common::TestDir;
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -41,6 +45,7 @@ fn is_reserved_device(name: &str) -> bool {
     RESERVED.contains(&stem.to_ascii_uppercase().as_str())
 }
 
+#[cfg(feature = "filesystem")]
 fn expect_resource_name(name: &str) -> bool {
     let trimmed = name.trim();
     if trimmed.is_empty() || trimmed != name || name == "." || name == ".." {

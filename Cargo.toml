@@ -53,6 +53,34 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 proptest = { version = "1.11.0", default-features = false, features = ["alloc", "no_std", "regex-syntax"] }
 
 [[example]]
+name = "basic"
+required-features = ["filesystem"]
+
+[[example]]
+name = "namespace"
+required-features = ["filesystem"]
+
+[[example]]
+name = "ownership"
+required-features = ["filesystem"]
+
+[[example]]
+name = "recovery"
+required-features = ["filesystem"]
+
+[[example]]
+name = "custom_backend"
+required-features = ["filesystem"]
+
+[[example]]
+name = "custom_scheduler"
+required-features = ["filesystem"]
+
+[[example]]
+name = "custom_policy"
+required-features = ["filesystem"]
+
+[[example]]
 name = "async_usage"
 required-features = ["tokio"]
 

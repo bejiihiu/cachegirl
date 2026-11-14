@@ -7,6 +7,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[allow(unused_imports)]
 use common::{BenchConfig, TempRoot, bench, observed, print_platform};
 
 #[cfg(feature = "memory")]
@@ -120,6 +121,7 @@ fn bench_packet_workload(root: &std::path::Path) {
 
 fn main() {
     print_platform();
+    #[allow(unused_variables)]
     let root = TempRoot::new("allocation");
 
     #[cfg(feature = "memory")]

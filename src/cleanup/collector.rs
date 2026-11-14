@@ -453,9 +453,13 @@ fn bump_attempts(registry: &Registry, id: &crate::core::resource::ResourceId) {
 
 #[cfg(test)]
 mod tests {
+    // юнит-тесты в этом модуле требуют файловый backend; без него тут пусто
+    #[allow(unused_imports)]
     use super::*;
+    #[allow(unused_imports)]
     use crate::core::resource::{ResourceKind, ResourceMeta};
 
+    #[cfg(feature = "filesystem")] // файловый backend — без фичи нет ресурса File для удаления
     #[test]
     fn reclaims_only_eligible_resources() {
         let dir = crate::testsupport::TestDir::new();
@@ -479,6 +483,7 @@ mod tests {
         assert_eq!(shared.registry.len().unwrap(), 1);
     }
 
+    #[cfg(feature = "filesystem")] // файловый backend — без фичи нет ресурса File для удаления
     #[test]
     fn leased_resource_is_deferred_not_destroyed() {
         let dir = crate::testsupport::TestDir::new();
@@ -505,6 +510,7 @@ mod tests {
         assert!(shared.registry.get(&pending.id).is_err());
     }
 
+    #[cfg(feature = "filesystem")] // файловый backend — без фичи нет ресурса File для удаления
     #[test]
     fn reasons_add_up() {
         let dir = crate::testsupport::TestDir::new();
@@ -522,6 +528,7 @@ mod tests {
         assert_eq!(report.reasons.eligible, 2);
     }
 
+    #[cfg(feature = "filesystem")] // файловый backend — без фичи нет ресурса File для удаления
     #[test]
     fn failed_cleanup_is_retried_until_the_attempt_budget_runs_out() {
         // one below the cap: the next pass must try again

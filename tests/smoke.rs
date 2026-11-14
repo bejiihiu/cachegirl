@@ -41,6 +41,7 @@ fn manager_namespace_cleanup_shutdown() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(feature = "filesystem")] // нужен именно файловый backend: create_file/create_directory
 #[test]
 fn public_api_create_release_flow() {
     let dir = std::env::temp_dir().join(format!(

@@ -78,6 +78,7 @@ impl FromStr for ResourceId {
 /// ```
 /// use cachegirl::{Ownership, TempManager};
 ///
+/// # #[cfg(feature = "filesystem")] {
 /// let dir = std::env::temp_dir().join(format!("cachegirl-own-{}", std::process::id()));
 /// let manager = TempManager::builder()
 ///     .root(&dir)
@@ -95,6 +96,7 @@ impl FromStr for ResourceId {
 ///
 /// manager.shutdown()?;
 /// let _ = std::fs::remove_dir_all(&dir);
+/// # }
 /// # Ok::<(), cachegirl::Error>(())
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Default)]
