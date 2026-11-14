@@ -311,7 +311,8 @@ impl TempManager {
     ///
     /// Blocks new namespace creation, optionally sweeps expired
     /// resources, and removes this instance's lock file. Safe to call
-    /// more than once.
+    /// more than once: only the first call runs the sweep, later calls
+    /// (including concurrent ones) return without doing extra work.
     #[cfg_attr(feature = "tracing", tracing::instrument(
         skip(self),
         name = "shutdown",
@@ -319,13 +320,14 @@ impl TempManager {
         fields(instance = %self.config.instance_id),
     ))]
     pub fn shutdown(&self) -> Result<CleanupReport> {
-        self.closed.store(true, Ordering::SeqCst);
+        // first caller does the sweep; everyone else no-ops calmly
+        let already_closed = self.closed.swap(true, Ordering::SeqCst);
         #[cfg(feature = "tracing")]
         tracing::info!(
             cleanup_on_shutdown = self.config.cleanup_on_shutdown,
             "manager shutting down"
         );
-        let report = if self.config.cleanup_on_shutdown {
+        let report = if self.config.cleanup_on_shutdown && !already_closed {
             self.cleanup_expired()?
         } else {
             CleanupReport::default()

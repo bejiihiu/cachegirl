@@ -203,6 +203,6 @@ fn shutdown_sweeps_expired_and_pending_then_stays_safe() {
     );
     let again = manager.shutdown().unwrap();
     assert_eq!(again.removed, 0);
-    // only the surviving in-ttl file is examined now, and it is left alone
-    assert_eq!(again.scanned, 1);
+    // the sweep already ran on the first call; the repeat is a pure no-op
+    assert_eq!(again.scanned, 0);
 }
