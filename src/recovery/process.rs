@@ -87,16 +87,23 @@ fn probe_platform_token(pid: u32) -> Option<String> {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs;
-    use std::path::Path;
 
     use super::ProcessState;
 
     pub(super) fn probe(pid: u32) -> ProcessState {
-        if !Path::new(&format!("/proc/{pid}")).exists() {
-            return ProcessState::Dead;
-        }
-        ProcessState::Alive {
-            start_token: start_token(pid),
+        match fs::metadata(format!("/proc/{pid}")) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ProcessState::Dead,
+            Err(e) => ProcessState::Unknown {
+                reason: format!("could not stat /proc/{pid}: {e}"),
+            },
+            Ok(_) => match start_token(pid) {
+                Some(token) => ProcessState::Alive {
+                    start_token: Some(token),
+                },
+                None => ProcessState::Unknown {
+                    reason: format!("/proc/{pid} exists but its stat is not readable"),
+                },
+            },
         }
     }
 
