@@ -1,8 +1,8 @@
 //! Async manager façade.
 
+use core::time::Duration;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::core::error::Result;
 use crate::core::manager::{ManagerConfig, SymlinkPolicy, TempManager, TempManagerBuilder};
@@ -36,8 +36,8 @@ impl Clone for AsyncTempManager {
     }
 }
 
-impl std::fmt::Debug for AsyncTempManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for AsyncTempManager {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AsyncTempManager")
             .field("instance_id", &self.inner.instance_id())
             .field("root", &self.inner.root())

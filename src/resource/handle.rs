@@ -34,7 +34,7 @@ impl ResourceHandle {
     /// Hand the id out without unregistering; the handle keeps ownership.
     pub fn detach(self) -> ResourceId {
         let id = self.id.clone();
-        std::mem::forget(self);
+        core::mem::forget(self);
         id
     }
 }

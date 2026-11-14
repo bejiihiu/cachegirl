@@ -7,9 +7,9 @@
 //! emit an observability event. Creation is serialized because quota
 //! checks are only atomic when they happen under this lock.
 
+use core::time::Duration;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use crate::backend::ResourceRequest;
 #[cfg(any(feature = "memory", feature = "cache"))]
@@ -617,8 +617,8 @@ mod tests {
     use crate::core::manager::TempManager;
     use crate::core::resource::ResourceKind;
     use crate::observability::{Event, VecSink};
+    use core::time::Duration;
     use std::sync::Arc;
-    use std::time::Duration;
 
     fn manager(dir: &std::path::Path) -> TempManager {
         TempManager::builder()

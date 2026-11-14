@@ -92,7 +92,7 @@ impl VecSink {
     pub fn drain(&self) -> Vec<Event> {
         self.events
             .lock()
-            .map(|mut v| std::mem::take(&mut *v))
+            .map(|mut v| core::mem::take(&mut *v))
             .unwrap_or_default()
     }
 

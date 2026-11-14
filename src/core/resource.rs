@@ -1,8 +1,8 @@
 //! Core resource identity and metadata.
 
+use core::fmt;
+use core::str::FromStr;
 use std::collections::HashMap;
-use std::fmt;
-use std::str::FromStr;
 use std::time::SystemTime;
 
 use crate::core::error::ConfigError;

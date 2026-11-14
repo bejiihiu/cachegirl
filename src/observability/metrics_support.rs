@@ -120,7 +120,7 @@ pub(crate) fn cleanup_run(scope: &'static str) {
 pub(crate) fn cleanup_run(_scope: &'static str) {}
 
 #[cfg(feature = "metrics")]
-pub(crate) fn cleanup_duration(scope: &'static str, duration: std::time::Duration) {
+pub(crate) fn cleanup_duration(scope: &'static str, duration: core::time::Duration) {
     metrics::histogram!(
         description: "Wall-clock duration of cleanup passes, in seconds",
         unit: metrics::Unit::Seconds,
@@ -132,7 +132,7 @@ pub(crate) fn cleanup_duration(scope: &'static str, duration: std::time::Duratio
 
 #[cfg(not(feature = "metrics"))]
 #[inline(always)]
-pub(crate) fn cleanup_duration(_scope: &'static str, _duration: std::time::Duration) {}
+pub(crate) fn cleanup_duration(_scope: &'static str, _duration: core::time::Duration) {}
 
 #[cfg(feature = "metrics")]
 pub(crate) fn quota_rejection(namespace: &str, reason: &'static str) {

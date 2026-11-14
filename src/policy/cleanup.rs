@@ -52,13 +52,13 @@ pub struct CleanupPolicyBuilder {
 
 impl CleanupPolicyBuilder {
     /// Fixed TTL counted from creation.
-    pub fn ttl(mut self, ttl: std::time::Duration) -> Self {
+    pub fn ttl(mut self, ttl: core::time::Duration) -> Self {
         self.ttl = Some(Ttl::Fixed(ttl));
         self
     }
 
     /// Sliding TTL counted from the last access.
-    pub fn idle_ttl(mut self, ttl: std::time::Duration) -> Self {
+    pub fn idle_ttl(mut self, ttl: core::time::Duration) -> Self {
         self.ttl = Some(Ttl::Idle(ttl));
         self
     }
@@ -94,7 +94,7 @@ impl CleanupPolicyBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use core::time::Duration;
 
     #[test]
     fn builder_assembles_policy() {

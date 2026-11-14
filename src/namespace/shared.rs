@@ -109,7 +109,7 @@ pub(crate) fn test_shared(root: &std::path::Path) -> Arc<NamespaceShared> {
     use crate::core::manager::{ManagerConfig, SymlinkPolicy};
     use crate::observability::NullSink;
     use crate::recovery::RecoveryPolicy;
-    use std::time::Duration;
+    use core::time::Duration;
 
     let config = ManagerConfig {
         root: root.to_path_buf(),

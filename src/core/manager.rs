@@ -4,11 +4,11 @@
 //! namespaces, and exposes explicit cleanup and shutdown hooks. It
 //! never spawns background threads and never requires an async runtime.
 
+use core::time::Duration;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use crate::cleanup::{CleanupEngine, CleanupReport, SweepView};
 use crate::core::error::{ConcurrencyError, ConfigError, Result};
@@ -348,8 +348,8 @@ impl TempManager {
     }
 }
 
-impl std::fmt::Debug for TempManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for TempManager {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TempManager")
             .field("instance_id", &self.config.instance_id)
             .field("root", &self.config.root)

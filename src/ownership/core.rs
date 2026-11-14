@@ -4,7 +4,7 @@
 //! resource types themselves (`resource.acquire()`, RAII drop) and on
 //! `TempManager::cleanup_expired`.
 
-use std::fmt::Debug;
+use core::fmt::Debug;
 use std::sync::Arc;
 
 use crate::core::error::{BackendError, Error, RegistryError};
@@ -55,7 +55,7 @@ impl Drop for OwnershipCore {
 }
 
 impl Debug for OwnershipCore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("OwnershipCore")
             .field("id", &self.id)
             .field("mode", &self.mode)

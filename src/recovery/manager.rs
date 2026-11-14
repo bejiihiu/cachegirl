@@ -17,10 +17,11 @@
 //! probe; when it does not match the probed token of a live pid, the pid
 //! was recycled and the recorded owner is considered gone.
 
+use core::time::Duration;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::process::{self, ProcessState};
 use crate::core::error::RecoveryError;
@@ -105,8 +106,8 @@ pub struct RecoveryReport {
     pub failure_reasons: Vec<String>,
 }
 
-impl std::fmt::Display for RecoveryReport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for RecoveryReport {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "recovery: scanned {}, removed {} ({} bytes freed), kept {}, skipped {}, failed {}",

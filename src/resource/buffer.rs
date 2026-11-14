@@ -153,7 +153,7 @@ impl BufferResource {
     /// Consuming the handle drops it; the ownership mode applies to it
     /// like to any other drop.
     pub fn into_vec(mut self) -> Vec<u8> {
-        std::mem::take(&mut self.buffer).into_inner()
+        core::mem::take(&mut self.buffer).into_inner()
     }
 }
 

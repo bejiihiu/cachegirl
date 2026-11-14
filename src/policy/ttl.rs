@@ -1,6 +1,7 @@
 //! Time-to-live modes.
 
-use std::time::{Duration, SystemTime};
+use core::time::Duration;
+use std::time::SystemTime;
 
 /// How a resource's lifetime is measured.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

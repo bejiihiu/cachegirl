@@ -220,7 +220,7 @@ mod tests {
     fn touch_updates_last_access() {
         let mut entry = CacheEntry::new("k", vec![1, 2, 3]);
         let before = entry.last_accessed;
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::thread::sleep(core::time::Duration::from_millis(2));
         entry.touch();
         assert!(entry.last_accessed >= before);
         assert_eq!(entry.len(), 3);

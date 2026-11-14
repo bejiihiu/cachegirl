@@ -1,7 +1,7 @@
 //! Aggregate result of a cleanup pass.
 
-use std::fmt;
-use std::time::Duration;
+use core::fmt;
+use core::time::Duration;
 
 /// Per-reason accounting of what (and why) a pass removed.
 ///
