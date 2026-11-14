@@ -124,7 +124,7 @@ impl StatisticsCollector {
             .iter()
             .filter(|m| m.state == crate::core::lifecycle::ResourceState::PendingCleanup)
             .count() as u64;
-        let bytes = metas.iter().map(|m| m.size_bytes).sum();
+        let bytes = crate::core::saturating_bytes(metas.iter().map(|m| m.size_bytes));
         Ok(Statistics {
             instance_id: instance_id.to_owned(),
             captured_at: Some(SystemTime::now()),

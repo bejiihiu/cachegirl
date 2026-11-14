@@ -556,9 +556,37 @@ impl RecoveryManager {
         Ok(report)
     }
 
+    /// Resolve `instance_id` to a directory that is guaranteed to sit
+    /// directly inside the canonical root.
+    ///
+    /// A planted symlink at `root/instance_id` (or a caller-supplied id
+    /// that walks out, though ids are validated upstream) must never
+    /// redirect lock writes outside the root. If the directory exists and
+    /// resolves elsewhere, we refuse; if it does not exist yet, it will
+    /// be created under the canonical root.
+    fn confined_instance_dir(&self, instance_id: &str) -> io::Result<PathBuf> {
+        let root = fs::canonicalize(&self.root)?;
+        let dir = root.join(instance_id);
+        match fs::canonicalize(&dir) {
+            Ok(canon) => {
+                if canon.starts_with(&root) {
+                    Ok(canon)
+                } else {
+                    Err(io::Error::other(format!(
+                        "instance directory `{}` escapes the recovery root",
+                        dir.display()
+                    )))
+                }
+            }
+            // not there yet: creation happens under the canonical root
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(dir),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Write the lock file for the current instance.
     pub fn write_lock(&self, instance_id: &str) -> io::Result<()> {
-        let dir = self.root.join(instance_id);
+        let dir = self.confined_instance_dir(instance_id)?;
         fs::create_dir_all(&dir)?;
         let lock = dir.join(LOCK_FILE);
         let created = SystemTime::now()
@@ -581,7 +609,8 @@ impl RecoveryManager {
 
     /// Remove the lock file of a cleanly-shut-down instance.
     pub fn remove_lock(&self, instance_id: &str) -> io::Result<()> {
-        let lock = self.root.join(instance_id).join(LOCK_FILE);
+        let dir = self.confined_instance_dir(instance_id)?;
+        let lock = dir.join(LOCK_FILE);
         match fs::remove_file(&lock) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),

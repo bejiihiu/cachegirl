@@ -364,7 +364,7 @@ fn enforce_limits(
     count_limit: Option<u64>,
     report: &mut CleanupReport,
 ) {
-    let mut bytes: u64 = metas.iter().map(|m| m.size_bytes).sum();
+    let mut bytes: u64 = crate::core::saturating_bytes(metas.iter().map(|m| m.size_bytes));
     let mut count: u64 = metas.len() as u64;
     for victim in metas {
         let bytes_over = bytes_limit.is_some_and(|limit| bytes > limit);

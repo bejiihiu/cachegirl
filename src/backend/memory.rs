@@ -36,7 +36,10 @@ impl MemoryBackend {
 
     /// Bytes currently tracked.
     pub fn current_bytes(&self) -> u64 {
-        self.inner.lock().map(|m| m.values().sum()).unwrap_or(0)
+        self.inner
+            .lock()
+            .map(|m| crate::core::saturating_bytes(m.values().copied()))
+            .unwrap_or(0)
     }
 
     /// Number of tracked resources.
@@ -76,7 +79,7 @@ impl ResourceBackend for MemoryBackend {
             backend: self.name().into(),
             reason: "accounting lock poisoned".into(),
         })?;
-        let current: u64 = map.values().sum();
+        let current: u64 = crate::core::saturating_bytes(map.values().copied());
         if let Some(limit) = self.max_bytes {
             let projected = current.saturating_add(size);
             if projected > limit {

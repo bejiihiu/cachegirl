@@ -14,6 +14,7 @@ use super::{ResourceBackend, ResourceRequest};
 use crate::core::error::{AccessError, BackendError, Error, ResourceCreationError, Result};
 use crate::core::manager::SymlinkPolicy;
 use crate::core::resource::{ResourceKind, ResourceMeta};
+use crate::namespace::is_reserved_device_name;
 
 /// Lexically normalize a path without touching the filesystem.
 ///
@@ -57,6 +58,9 @@ pub(crate) fn validate_segment(name: &str) -> Result<()> {
         return Err(AccessError::UnsafeName(name.to_owned()).into());
     }
     if name.ends_with('.') {
+        return Err(AccessError::UnsafeName(name.to_owned()).into());
+    }
+    if is_reserved_device_name(name) {
         return Err(AccessError::UnsafeName(name.to_owned()).into());
     }
     Ok(())
@@ -110,14 +114,69 @@ impl FilesystemBackend {
         Ok(normalized)
     }
 
+    /// Every existing component under `parent` must resolve inside the
+    /// root.
+    ///
+    /// Lexical `starts_with` cannot see a symlinked intermediate
+    /// directory, so walk up to the deepest existing ancestor and
+    /// canonicalize it. A path whose every resolvable ancestor is
+    /// confined is allowed; the moment one resolves outside, we bail
+    /// out. Called with the parent of the path being created or
+    /// removed on purpose, so a symlink as the final component never
+    /// reaches `canonicalize` (the caller decides what to do with
+    /// links themselves).
+    fn ensure_existing_ancestor_inside(&self, parent: &Path) -> Result<()> {
+        let mut probe = parent.to_path_buf();
+        loop {
+            match fs::canonicalize(&probe) {
+                Ok(canon) => {
+                    if canon.starts_with(&self.root) {
+                        return Ok(());
+                    }
+                    return Err(AccessError::OutsideRoot {
+                        path: canon,
+                        root: self.root.clone(),
+                    }
+                    .into());
+                }
+                Err(_) => {
+                    if !probe.pop() {
+                        // nothing on the path exists yet; the root itself
+                        // is canonical and confined by construction
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
     fn check_symlink(&self, path: &Path) -> Result<()> {
         let is_symlink = fs::symlink_metadata(path)
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
-        if is_symlink && self.symlink_policy == SymlinkPolicy::Reject {
-            return Err(AccessError::SymlinkRejected(path.to_path_buf()).into());
+        if !is_symlink {
+            return Ok(());
         }
-        Ok(())
+        match self.symlink_policy {
+            SymlinkPolicy::Reject => Err(AccessError::SymlinkRejected(path.to_path_buf()).into()),
+            SymlinkPolicy::WithinRoot => {
+                // a dangling link can't be verified either: refuse
+                let canon = fs::canonicalize(path).map_err(|_| AccessError::OutsideRoot {
+                    path: path.to_path_buf(),
+                    root: self.root.clone(),
+                })?;
+                if canon.starts_with(&self.root) {
+                    Ok(())
+                } else {
+                    Err(AccessError::OutsideRoot {
+                        path: canon,
+                        root: self.root.clone(),
+                    }
+                    .into())
+                }
+            }
+            SymlinkPolicy::Allow => Ok(()),
+        }
     }
 }
 
@@ -140,10 +199,17 @@ impl ResourceBackend for FilesystemBackend {
             .parent()
             .expect("resolved path always has a parent")
             .to_path_buf();
+        // the final component may not exist yet, but every component up
+        // to the deepest existing ancestor must stay inside the root —
+        // a planted symlinked directory must not swallow the file
+        self.ensure_existing_ancestor_inside(&parent)?;
         fs::create_dir_all(&parent).map_err(|source| BackendError::Io {
             backend: self.name().into(),
             source,
         })?;
+        // re-check after the mkdir: the directory may have been planted
+        // or swapped between the two calls
+        self.ensure_existing_ancestor_inside(&parent)?;
 
         match request.kind {
             ResourceKind::File => {
@@ -200,6 +266,11 @@ impl ResourceBackend for FilesystemBackend {
                 root: self.root.clone(),
             }
             .into());
+        }
+        // a lexically-confined path can still walk out through a
+        // symlinked parent; verify every resolvable ancestor stays inside
+        if let Some(parent) = normalized.parent() {
+            self.ensure_existing_ancestor_inside(parent)?;
         }
         let Ok(meta_fs) = fs::symlink_metadata(&normalized) else {
             return Ok(()); // already gone: release is idempotent

@@ -86,7 +86,13 @@ fn default_stale_instance_after() -> Duration {
 
 impl ManagerConfig {
     fn validate(&self) -> Result<()> {
+        // "." and ".." pass the charset check below, but they would make
+        // the instance dir alias the root itself or climb above it
         if self.instance_id.trim().is_empty()
+            || self.instance_id == "."
+            || self.instance_id == ".."
+            // windows strips trailing dots, so "i-1." and "i-1" alias one dir
+            || self.instance_id.ends_with('.')
             || !self
                 .instance_id
                 .chars()

@@ -151,7 +151,8 @@ impl Namespace {
     fn check_quotas(&self, added_bytes: u64) -> Result<()> {
         let shared = self.shared();
         let snapshot = shared.registry.snapshot()?;
-        let manager_bytes: u64 = snapshot.iter().map(|m| m.size_bytes).sum();
+        let manager_bytes: u64 =
+            crate::core::saturating_bytes(snapshot.iter().map(|m| m.size_bytes));
         let manager_count = snapshot.len() as u64;
 
         let manager_quota = crate::namespace::NamespaceQuota {

@@ -21,6 +21,20 @@ use crate::core::error::{AccessError, ConfigError};
 use crate::core::registry::Registry;
 use crate::core::resource::ResourceMeta;
 
+/// Windows treats these basenames as device names, case-insensitively,
+/// with any extension attached (`NUL`, `NUL.txt`, `con.log`, ...). A
+/// file created under one of those names silently opens the device
+/// instead of a disk file, so nothing ever round-trips. Rejected
+/// everywhere, not only on Windows — over-rejecting beats an alias.
+pub(crate) fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("");
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    RESERVED.contains(&stem.to_ascii_uppercase().as_str())
+}
+
 /// Validate a namespace name: non-empty, no path traversal, sane charset.
 pub(crate) fn validate_namespace_name(name: &str) -> Result<(), ConfigError> {
     let trimmed = name.trim();
@@ -32,6 +46,9 @@ pub(crate) fn validate_namespace_name(name: &str) -> Result<(), ConfigError> {
     }
     // windows strips trailing dots, so "ns" and "ns." would alias one dir
     if name.ends_with('.') {
+        return Err(ConfigError::InvalidNamespaceName(name.to_owned()));
+    }
+    if is_reserved_device_name(name) {
         return Err(ConfigError::InvalidNamespaceName(name.to_owned()));
     }
     if !name
@@ -62,6 +79,9 @@ pub(crate) fn validate_resource_name(name: &str) -> Result<(), AccessError> {
         return Err(AccessError::UnsafeName(name.to_owned()));
     }
     if name.ends_with('.') {
+        return Err(AccessError::UnsafeName(name.to_owned()));
+    }
+    if is_reserved_device_name(name) {
         return Err(AccessError::UnsafeName(name.to_owned()));
     }
     Ok(())
@@ -124,7 +144,7 @@ impl Namespace {
     /// Current usage: bytes and live resource count.
     pub fn usage(&self) -> crate::core::error::Result<(u64, u64)> {
         let items = self.registry.snapshot_namespace(&self.name)?;
-        let bytes = items.iter().map(|m| m.size_bytes).sum();
+        let bytes = crate::core::saturating_bytes(items.iter().map(|m| m.size_bytes));
         Ok((bytes, items.len() as u64))
     }
 

@@ -109,7 +109,9 @@ impl Registry {
 
     /// Total tracked size across all resources, in bytes.
     pub fn total_bytes(&self) -> Result<u64, RegistryError> {
-        Ok(self.snapshot()?.iter().map(|m| m.size_bytes).sum())
+        Ok(crate::core::saturating_bytes(
+            self.snapshot()?.iter().map(|m| m.size_bytes),
+        ))
     }
 }
 
