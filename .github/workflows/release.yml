@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # workflow-level so the "is the token set?" check in a later step can read it
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches crate version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          manifest_version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${manifest_version}"
+            exit 1
+          fi
+
+      - name: Dry-run publish
+        run: cargo publish --dry-run --locked
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+
+      - name: Check for crates.io token
+        id: registry-token
+        run: |
+          if [ -n "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to crates.io
+        if: steps.registry-token.outputs.present == 'true'
+        run: cargo publish --locked
+
+      - name: Skip crates.io publish (no token configured)
+        if: steps.registry-token.outputs.present == 'false'
+        run: echo "secrets.CARGO_REGISTRY_TOKEN is not set — skipping cargo publish. The GitHub Release was created; publish manually with 'cargo publish' when a token is configured."
