@@ -5,7 +5,6 @@ edition = "2024"
 rust-version = "1.85"
 description = "Centralized management of temporary resources in Rust: files, buffers, caches, and scratch data with namespaces, quotas, leases, cleanup policies, and crash recovery"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/bejiihiu/cachegirl"
 repository = "https://github.com/bejiihiu/cachegirl"
 documentation = "https://docs.rs/cachegirl"
 keywords = ["cache", "temporary", "tempfile", "cleanup", "resources"]

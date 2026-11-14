@@ -462,7 +462,9 @@ mod tracing_tests {
     #[test]
     fn creation_release_and_cleanup_are_traced() {
         let capture = CaptureLayer::new();
-        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .with(capture.clone());
 
         let dir = unique_dir("traced");
         tracing::subscriber::with_default(subscriber, || {
@@ -548,7 +550,9 @@ mod tracing_tests {
     #[test]
     fn quota_rejection_is_logged_as_warning() {
         let capture = CaptureLayer::new();
-        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .with(capture.clone());
 
         let dir = unique_dir("traced-quota");
         tracing::subscriber::with_default(subscriber, || {
