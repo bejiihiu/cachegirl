@@ -42,6 +42,64 @@ fn manager_namespace_cleanup_shutdown() {
 }
 
 #[test]
+fn public_api_create_release_flow() {
+    let dir = std::env::temp_dir().join(format!(
+        "cachegirl-smoke3-{:x}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        std::process::id()
+    ));
+
+    let sink = std::sync::Arc::new(cachegirl::VecSink::new());
+    let manager = TempManager::builder()
+        .root(&dir)
+        .create_if_missing(true)
+        .instance_id("smoke-create")
+        .default_ttl(std::time::Duration::from_secs(3600))
+        .event_sink(sink.clone())
+        .build()
+        .unwrap();
+
+    let protocol = manager.namespace("protocol").unwrap();
+    let file = protocol.create_file("packet-dump.bin").unwrap();
+    assert!(file.exists());
+
+    let directory = protocol.create_directory("work").unwrap();
+    assert!(directory.exists());
+
+    #[cfg(feature = "memory")]
+    {
+        let mut buf = protocol.create_buffer(64 * 1024).unwrap();
+        buf.extend_from_slice(b"ping");
+        assert_eq!(buf.len(), 4);
+    }
+
+    let stats = manager.stats().unwrap();
+    assert!(stats.resources >= 2);
+
+    let id = file.id().clone();
+    assert!(protocol.release(&id).unwrap());
+    assert!(!file.exists());
+
+    let events = sink.drain();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, cachegirl::Event::ResourceCreated { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, cachegirl::Event::ResourceReleased { .. }))
+    );
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn registry_and_leases_work_across_handles() {
     let dir = std::env::temp_dir().join(format!(
         "cachegirl-smoke2-{:x}-{}",

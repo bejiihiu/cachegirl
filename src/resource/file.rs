@@ -47,9 +47,46 @@ impl FileResource {
         Ok(self.len()? == 0)
     }
 
-    /// True when the file still exists.
+    /// True when the path still exists (file or directory).
     pub fn exists(&self) -> bool {
-        self.path.is_file()
+        self.path.exists()
+    }
+
+    /// Last modification time reported by the filesystem.
+    pub fn modified(&self) -> io::Result<SystemTime> {
+        fs::metadata(&self.path)?.modified()
+    }
+}
+
+/// Lightweight handle to a registered directory resource.
+#[derive(Clone, Debug)]
+pub struct DirectoryResource {
+    id: ResourceId,
+    path: PathBuf,
+}
+
+impl DirectoryResource {
+    /// Wrap a path with its resource id.
+    pub fn new(id: ResourceId, path: impl Into<PathBuf>) -> Self {
+        Self {
+            id,
+            path: path.into(),
+        }
+    }
+
+    /// Resource id in the registry.
+    pub fn id(&self) -> &ResourceId {
+        &self.id
+    }
+
+    /// Path on disk.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// True when the directory still exists.
+    pub fn exists(&self) -> bool {
+        self.path.is_dir()
     }
 
     /// Last modification time reported by the filesystem.
@@ -70,6 +107,17 @@ mod tests {
         let res = FileResource::new(ResourceId::new(), &path);
         assert!(res.exists());
         assert_eq!(res.len().unwrap(), 5);
+        assert!(res.modified().is_ok());
+    }
+
+    #[test]
+    fn directory_resource_roundtrip() {
+        let dir = crate::testsupport::TestDir::new();
+        let path = dir.path().join("scratch");
+        fs::create_dir(&path).unwrap();
+        let res = DirectoryResource::new(ResourceId::new(), &path);
+        assert!(res.exists());
+        assert_eq!(res.path(), path.as_path());
         assert!(res.modified().is_ok());
     }
 }

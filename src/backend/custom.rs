@@ -21,10 +21,16 @@ impl BackendRegistry {
     }
 
     /// Register a backend under its own name. Replaces any existing entry.
-    pub fn register(&self, backend: Arc<dyn ResourceBackend>) {
-        if let Ok(mut map) = self.map.lock() {
-            map.insert(backend.name().to_owned(), backend);
-        }
+    pub fn register(
+        &self,
+        backend: Arc<dyn ResourceBackend>,
+    ) -> Result<(), crate::core::error::ConcurrencyError> {
+        let mut map = self
+            .map
+            .lock()
+            .map_err(|_| crate::core::error::ConcurrencyError::Poisoned)?;
+        map.insert(backend.name().to_owned(), backend);
+        Ok(())
     }
 
     /// Look a backend up by name.
@@ -81,7 +87,7 @@ mod tests {
     fn register_and_lookup() {
         let reg = BackendRegistry::new();
         assert!(reg.is_empty());
-        reg.register(Arc::new(Dummy));
+        reg.register(Arc::new(Dummy)).unwrap();
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.names(), vec!["dummy".to_string()]);
         assert!(reg.get("dummy").is_some());

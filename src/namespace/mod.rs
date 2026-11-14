@@ -4,14 +4,20 @@
 //! their own quota and metadata, and can never touch resources that
 //! belong to a different namespace through this API.
 
+mod create;
 mod quota;
+mod shared;
 
+pub use create::CreateOptions;
 pub use quota::NamespaceQuota;
+#[cfg(test)]
+pub(crate) use shared::test_shared;
+pub(crate) use shared::{Backends, NamespaceShared};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::core::error::ConfigError;
+use crate::core::error::{AccessError, ConfigError};
 use crate::core::registry::Registry;
 use crate::core::resource::ResourceMeta;
 
@@ -33,24 +39,51 @@ pub(crate) fn validate_namespace_name(name: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Validate a resource name: non-empty, no traversal, no control characters.
+pub(crate) fn validate_resource_name(name: &str) -> Result<(), AccessError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed != name
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\'])
+    {
+        return Err(AccessError::UnsafeName(name.to_owned()));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(AccessError::UnsafeName(name.to_owned()));
+    }
+    Ok(())
+}
+
 /// A logical isolation boundary for resources.
 ///
-/// Cheap to clone; all clones point at the same underlying state.
+/// Cheap to clone; all clones point at the same underlying state. A
+/// namespace shares its manager's registry, backends and quota
+/// plumbing through an internal reference created at `TempManager`
+/// build time.
 pub struct Namespace {
     name: String,
     registry: Arc<Registry>,
+    shared: Arc<NamespaceShared>,
     quota: RwLock<NamespaceQuota>,
     metadata: Mutex<HashMap<String, String>>,
 }
 
 impl Namespace {
-    pub(crate) fn new(name: String, registry: Arc<Registry>) -> Self {
+    pub(crate) fn new(name: String, registry: Arc<Registry>, shared: Arc<NamespaceShared>) -> Self {
         Self {
             name,
             registry,
+            shared,
             quota: RwLock::new(NamespaceQuota::unlimited()),
             metadata: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Access to the shared manager plumbing (registry, backends, sink).
+    pub(crate) fn shared(&self) -> &Arc<NamespaceShared> {
+        &self.shared
     }
 
     /// Namespace name.
@@ -116,9 +149,22 @@ mod tests {
     }
 
     #[test]
+    fn resource_names_are_validated() {
+        assert!(validate_resource_name("packet-dump.bin").is_ok());
+        assert!(validate_resource_name("").is_err());
+        assert!(validate_resource_name(" padded").is_err());
+        assert!(validate_resource_name(".").is_err());
+        assert!(validate_resource_name("..").is_err());
+        assert!(validate_resource_name("a/b").is_err());
+        assert!(validate_resource_name("a\\b").is_err());
+        assert!(validate_resource_name("a\u{7}b").is_err());
+    }
+
+    #[test]
     fn quota_roundtrip() {
-        let reg = Arc::new(Registry::new());
-        let ns = Namespace::new("test".into(), reg);
+        let dir = crate::testsupport::TestDir::new();
+        let shared = test_shared(dir.path());
+        let ns = Namespace::new("test".into(), Arc::clone(&shared.registry), shared);
         assert_eq!(ns.quota(), NamespaceQuota::unlimited());
         ns.set_quota(NamespaceQuota::with_max_bytes(1024));
         assert_eq!(ns.quota().max_bytes, Some(1024));

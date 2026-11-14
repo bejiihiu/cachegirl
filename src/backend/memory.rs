@@ -89,6 +89,9 @@ impl ResourceBackend for MemoryBackend {
         }
         let mut meta = ResourceMeta::new(&request.name, &request.namespace, request.kind);
         meta.size_bytes = size;
+        for (k, v) in &request.metadata {
+            meta.metadata.insert(k.clone(), v.clone());
+        }
         map.insert(meta.id.clone(), size);
         Ok(meta)
     }

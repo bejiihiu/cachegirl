@@ -39,7 +39,18 @@ let manager = TempManager::builder()
     .build()?;
 
 let protocol = manager.namespace("protocol")?;
-// ... create and use resources ...
+
+let file = protocol.create_file("packet-dump.bin")?;
+assert!(file.path().is_file());
+
+let scratch = protocol.create_directory("scratch")?;
+assert!(scratch.exists());
+
+// with the `memory` feature:
+// let buffer = protocol.create_buffer(64 * 1024)?;
+
+protocol.release(file.id())?;
+
 let report = manager.cleanup_expired()?;
 manager.shutdown()?;
 ```

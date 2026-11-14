@@ -119,6 +119,8 @@ pub struct ResourceMeta {
     pub size_bytes: u64,
     /// Current lifecycle state.
     pub state: ResourceState,
+    /// How long the resource may live, if a TTL applies.
+    pub ttl: Option<std::time::Duration>,
     /// Free-form user metadata.
     pub metadata: HashMap<String, String>,
 }
@@ -137,6 +139,7 @@ impl ResourceMeta {
             last_accessed: now,
             size_bytes: 0,
             state: ResourceState::Created,
+            ttl: None,
             metadata: HashMap::new(),
         }
     }

@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use crate::cleanup::{CleanupEngine, CleanupReport};
 use crate::core::error::{ConcurrencyError, ConfigError, Result};
-use crate::namespace::{Namespace, validate_namespace_name};
-use crate::observability::{Statistics, StatisticsCollector};
+use crate::namespace::{Backends, Namespace, NamespaceShared, validate_namespace_name};
+use crate::observability::{EventSink, NullSink, Statistics, StatisticsCollector};
 #[cfg(feature = "filesystem")]
 use crate::recovery::RecoveryManager;
 use crate::recovery::RecoveryPolicy;
@@ -84,8 +84,9 @@ pub struct TempManager {
     config: ManagerConfig,
     registry: Arc<crate::core::registry::Registry>,
     namespaces: Mutex<HashMap<String, Arc<Namespace>>>,
-    closed: AtomicBool,
-    counters: StatisticsCollector,
+    closed: Arc<AtomicBool>,
+    counters: Arc<StatisticsCollector>,
+    shared: Arc<NamespaceShared>,
 }
 
 impl TempManager {
@@ -119,6 +120,22 @@ impl TempManager {
         Arc::clone(&self.registry)
     }
 
+    /// Register a custom backend under its own name.
+    ///
+    /// The backend becomes reachable through [`Namespace::create_custom`] and through
+    /// release routing for resources it materialized. Re-registering the same name
+    /// replaces the previous backend.
+    pub fn register_backend(
+        &self,
+        backend: Arc<dyn crate::backend::ResourceBackend>,
+    ) -> Result<()> {
+        self.shared
+            .backends
+            .custom
+            .register(backend)
+            .map_err(Into::into)
+    }
+
     /// Flags whether the manager accepted the shutdown sequence.
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
@@ -147,7 +164,11 @@ impl TempManager {
             std::fs::create_dir_all(&dir)
                 .map_err(|source| ConfigError::RootCreate { path: dir, source })?;
         }
-        let ns = Arc::new(Namespace::new(name.to_owned(), Arc::clone(&self.registry)));
+        let ns = Arc::new(Namespace::new(
+            name.to_owned(),
+            Arc::clone(&self.registry),
+            Arc::clone(&self.shared),
+        ));
         namespaces.insert(name.to_owned(), Arc::clone(&ns));
         Ok(ns)
     }
@@ -228,6 +249,7 @@ pub struct TempManagerBuilder {
     symlink_policy: SymlinkPolicy,
     instance_id: Option<String>,
     recovery_policy: RecoveryPolicy,
+    event_sink: Arc<dyn EventSink>,
 }
 
 impl Default for TempManagerBuilder {
@@ -243,6 +265,7 @@ impl Default for TempManagerBuilder {
             symlink_policy: SymlinkPolicy::default(),
             instance_id: None,
             recovery_policy: RecoveryPolicy::default(),
+            event_sink: Arc::new(NullSink),
         }
     }
 }
@@ -308,6 +331,12 @@ impl TempManagerBuilder {
         self
     }
 
+    /// Where structured lifecycle events are emitted. Default: [`NullSink`].
+    pub fn event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.event_sink = sink;
+        self
+    }
+
     /// Validate and build the manager.
     pub fn build(self) -> Result<TempManager> {
         let root = self
@@ -370,12 +399,31 @@ impl TempManagerBuilder {
                 })?;
         }
 
+        #[cfg(feature = "filesystem")]
+        let backends = Backends::new(&config.root, &config.instance_id, config.symlink_policy)?;
+        #[cfg(not(feature = "filesystem"))]
+        let backends = Backends::new()?;
+
+        let registry = Arc::new(crate::core::registry::Registry::new());
+        let counters = Arc::new(StatisticsCollector::new());
+        let closed = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(NamespaceShared {
+            config: Arc::new(config.clone()),
+            registry: Arc::clone(&registry),
+            backends,
+            counters: Arc::clone(&counters),
+            sink: self.event_sink,
+            create_lock: Mutex::new(()),
+            closed: Arc::clone(&closed),
+        });
+
         Ok(TempManager {
             config,
-            registry: Arc::new(crate::core::registry::Registry::new()),
+            registry,
             namespaces: Mutex::new(HashMap::new()),
-            closed: AtomicBool::new(false),
-            counters: StatisticsCollector::new(),
+            closed,
+            counters,
+            shared,
         })
     }
 }

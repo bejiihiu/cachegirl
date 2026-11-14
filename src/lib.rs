@@ -34,7 +34,9 @@
 //!     .build()?;
 //!
 //! let protocol = manager.namespace("protocol")?;
-//! assert_eq!(protocol.name(), "protocol");
+//! let file = protocol.create_file("packet-dump.bin")?;
+//! assert!(file.path().exists());
+//! protocol.release(file.id())?;
 //!
 //! let report = manager.cleanup_expired()?;
 //! assert_eq!(report.removed, 0);
@@ -72,11 +74,17 @@ pub use core::lifecycle::ResourceState;
 pub use core::manager::{ManagerConfig, SymlinkPolicy, TempManager, TempManagerBuilder};
 pub use core::registry::Registry;
 pub use core::resource::{ResourceId, ResourceKind, ResourceMeta};
-pub use namespace::{Namespace, NamespaceQuota};
+pub use namespace::{CreateOptions, Namespace, NamespaceQuota};
 #[cfg(feature = "tracing")]
 pub use observability::TracingSink;
-pub use observability::{Event, EventSink, Statistics, StatisticsCollector, VecSink};
+pub use observability::{Event, EventSink, NullSink, Statistics, StatisticsCollector, VecSink};
 pub use ownership::{Lease, LeaseBook, LockGuard, LockSet};
 pub use policy::{CleanupPolicy, CleanupPolicyBuilder, Priority, Quota, Ttl};
 pub use recovery::{RecoveryManager, RecoveryPolicy, RecoveryReport};
-pub use resource::ResourceHandle;
+#[cfg(feature = "cache")]
+pub use resource::CacheEntryResource;
+#[cfg(feature = "memory")]
+pub use resource::{BufferResource, RuntimeResource, SerializationResource};
+pub use resource::{CustomResource, ResourceHandle};
+#[cfg(feature = "filesystem")]
+pub use resource::{DirectoryResource, FileResource};
