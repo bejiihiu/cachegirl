@@ -1,0 +1,38 @@
+[package]
+name = "cachegirl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Centralized management of temporary resources in Rust: files, buffers, caches, and scratch data with namespaces, quotas, leases, cleanup policies, and crash recovery"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/bejiihiu/cachegirl"
+repository = "https://github.com/bejiihiu/cachegirl"
+keywords = ["cache", "temporary", "tempfile", "cleanup", "resources"]
+categories = ["caching", "filesystem", "memory-management", "concurrency", "os"]
+readme = "README.md"
+exclude = ["IDEA.md", "notes.md"]
+
+[features]
+default = ["filesystem"]
+filesystem = []
+memory = []
+cache = []
+async = []
+sync = []
+serde = ["dep:serde"]
+metrics = ["dep:metrics"]
+tracing = ["dep:tracing"]
+tokio = ["dep:tokio", "async"]
+
+[dependencies]
+thiserror = "2"
+serde = { version = "1", optional = true, features = ["derive"] }
+metrics = { version = "0.24", optional = true }
+tracing = { version = "0.1", optional = true }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
