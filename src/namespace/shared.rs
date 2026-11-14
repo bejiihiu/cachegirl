@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::backend::{BackendRegistry, ResourceBackend};
 use crate::core::manager::ManagerConfig;
@@ -92,6 +92,10 @@ pub(crate) struct NamespaceShared {
     pub(crate) create_lock: Mutex<()>,
     /// Shared shutdown flag; set by `TempManager::shutdown`.
     pub(crate) closed: Arc<AtomicBool>,
+    /// Manager-wide cleanup policy, when one has been configured.
+    pub(crate) cleanup_policy: RwLock<Option<crate::policy::CleanupPolicy>>,
+    /// Manager-wide custom cleanup policy, when one has been configured.
+    pub(crate) custom_cleanup_policy: RwLock<Option<Arc<dyn crate::policy::CustomCleanupPolicy>>>,
 }
 
 impl NamespaceShared {
@@ -135,5 +139,7 @@ pub(crate) fn test_shared(root: &std::path::Path) -> Arc<NamespaceShared> {
         sink: Arc::new(NullSink),
         create_lock: Mutex::new(()),
         closed: Arc::new(AtomicBool::new(false)),
+        cleanup_policy: RwLock::new(None),
+        custom_cleanup_policy: RwLock::new(None),
     })
 }

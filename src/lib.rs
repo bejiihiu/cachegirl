@@ -71,7 +71,7 @@ pub mod policy;
 pub mod recovery;
 pub mod resource;
 
-pub use cleanup::{CleanupEngine, CleanupReport};
+pub use cleanup::{CleanupEngine, CleanupReport, MAX_CLEANUP_ATTEMPTS, RemovalReasons};
 pub use core::error::{
     AccessError, BackendError, CleanupError, ConcurrencyError, ConfigError, Error, QuotaError,
     RecoveryError, RegistryError, ResourceCreationError, Result,
@@ -85,7 +85,10 @@ pub use namespace::{CreateOptions, Namespace, NamespaceQuota};
 pub use observability::TracingSink;
 pub use observability::{Event, EventSink, NullSink, Statistics, StatisticsCollector, VecSink};
 pub use ownership::{Lease, LeaseBook, LockGuard, LockSet};
-pub use policy::{CleanupPolicy, CleanupPolicyBuilder, Priority, Quota, Ttl};
+pub use policy::{
+    CleanupContext, CleanupPolicy, CleanupPolicyBuilder, CleanupScope, CustomCleanupPolicy,
+    PolicyDecision, Priority, Quota, Ttl,
+};
 pub use recovery::{RecoveryManager, RecoveryPolicy, RecoveryReport};
 #[cfg(feature = "cache")]
 pub use resource::CacheEntryResource;

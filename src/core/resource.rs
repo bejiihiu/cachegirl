@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use crate::core::error::ConfigError;
 use crate::core::lifecycle::ResourceState;
+use crate::policy::{Priority, Ttl};
 
 /// Unique identifier of a registered resource.
 ///
@@ -199,9 +200,19 @@ pub struct ResourceMeta {
     /// Current lifecycle state.
     pub state: ResourceState,
     /// How long the resource may live, if a TTL applies.
-    pub ttl: Option<std::time::Duration>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ttl: Option<Ttl>,
     /// Ownership mode chosen at creation time.
     pub ownership: Ownership,
+    /// Eviction priority relative to other resources.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub priority: Priority,
+    /// How many cleanup attempts the resource has already survived.
+    ///
+    /// Bumped every time a destruction fails; cleanup stops retrying
+    /// after [`crate::cleanup::MAX_CLEANUP_ATTEMPTS`] attempts.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub cleanup_attempts: u32,
     /// Free-form user metadata.
     pub metadata: HashMap<String, String>,
 }
@@ -222,6 +233,8 @@ impl ResourceMeta {
             state: ResourceState::Created,
             ttl: None,
             ownership: Ownership::Managed,
+            priority: Priority::Normal,
+            cleanup_attempts: 0,
             metadata: HashMap::new(),
         }
     }

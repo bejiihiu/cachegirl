@@ -4,17 +4,22 @@ use crate::policy::quota::Quota;
 use crate::policy::ttl::Ttl;
 
 /// How eagerly a resource should be reclaimed relative to others.
+///
+/// Eviction favours reclaiming lower-priority resources first: `Low` is
+/// evicted before `Normal`, which is evicted before `High`, and
+/// `Critical` only when everything else is gone. The derived `Ord`
+/// reflects importance, so sorting ascending yields eviction order.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Priority {
-    /// Kept the longest; only evicted when everything else is gone.
+    /// Evicted first; for scratch data that is cheap to recreate.
     Low,
     /// Default.
     #[default]
     Normal,
-    /// Evicted before normal-priority resources.
+    /// Evicted only after lower-priority resources are gone.
     High,
-    /// Evicted first.
+    /// Evicted last; for resources the application cannot afford to lose.
     Critical,
 }
 
@@ -111,5 +116,26 @@ mod tests {
         assert!(p.ttl.is_none());
         assert_eq!(p.quota, Quota::unlimited());
         assert_eq!(p.priority, Priority::Normal);
+    }
+
+    #[test]
+    fn eviction_order_is_low_normal_high_critical() {
+        // eviction scans ascending: the weakest priority goes first
+        let mut order = vec![
+            Priority::Critical,
+            Priority::High,
+            Priority::Normal,
+            Priority::Low,
+        ];
+        order.sort();
+        assert_eq!(
+            order,
+            vec![
+                Priority::Low,
+                Priority::Normal,
+                Priority::High,
+                Priority::Critical
+            ]
+        );
     }
 }

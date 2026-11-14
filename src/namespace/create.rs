@@ -24,14 +24,22 @@ use crate::observability::Event;
 pub struct CreateOptions {
     /// Owner tag, e.g. the component or request id responsible.
     pub owner: Option<String>,
-    /// TTL override; falls back to the manager's `default_ttl`.
+    /// Fixed TTL counted from creation; falls back to the manager's `default_ttl`.
     pub ttl: Option<Duration>,
+    /// Sliding TTL counted from the last access.
+    pub idle_ttl: Option<Duration>,
     /// How the resource's lifetime is tied to its handles.
     ///
     /// Defaults to [`crate::Ownership::Managed`]: the resource lives
     /// until it is released or reclaimed by a cleanup pass. See
     /// [`crate::Ownership`] for the full semantics of every mode.
     pub ownership: crate::core::resource::Ownership,
+    /// Eviction priority relative to other resources.
+    ///
+    /// When unset, the resource inherits the priority of the effective
+    /// cleanup policy (namespace-specific if set, else the manager-wide
+    /// one), falling back to [`crate::Priority::Normal`].
+    pub priority: Option<crate::policy::Priority>,
     /// Free-form metadata attached to the registry record.
     pub metadata: HashMap<String, String>,
 }
@@ -48,9 +56,19 @@ impl CreateOptions {
         self
     }
 
-    /// Give the resource its own TTL instead of the manager default.
+    /// Give the resource a fixed TTL counted from creation,
+    /// instead of the manager default.
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
+        self
+    }
+
+    /// Give the resource a sliding idle TTL counted from the last access.
+    ///
+    /// Cannot be combined with [`CreateOptions::ttl`]; setting both is a
+    /// configuration error.
+    pub fn idle_ttl(mut self, ttl: Duration) -> Self {
+        self.idle_ttl = Some(ttl);
         self
     }
 
@@ -59,6 +77,15 @@ impl CreateOptions {
     /// See [`crate::Ownership`] for what each mode does on drop.
     pub fn ownership(mut self, ownership: crate::core::resource::Ownership) -> Self {
         self.ownership = ownership;
+        self
+    }
+
+    /// Choose the eviction priority for the resource.
+    ///
+    /// Lower-priority resources are evicted first when a quota is
+    /// exceeded; `Critical` resources are evicted last.
+    pub fn priority(mut self, priority: crate::policy::Priority) -> Self {
+        self.priority = Some(priority);
         self
     }
 
@@ -128,6 +155,12 @@ impl Namespace {
         backend_name: Option<&str>,
         options: CreateOptions,
     ) -> Result<ResourceMeta> {
+        if options.ttl.is_some() && options.idle_ttl.is_some() {
+            return Err(crate::core::error::ConfigError::Invalid(
+                "`ttl` and `idle_ttl` are mutually exclusive".into(),
+            )
+            .into());
+        }
         let shared = self.shared();
         let backend = match backend_name {
             Some(name) => {
@@ -164,9 +197,16 @@ impl Namespace {
         }
 
         let mut meta = backend.create(&request)?;
-        meta.ttl = options.ttl.or(shared.config.default_ttl);
+        meta.ttl = options
+            .idle_ttl
+            .map(crate::policy::Ttl::Idle)
+            .or_else(|| options.ttl.map(crate::policy::Ttl::Fixed))
+            .or_else(|| shared.config.default_ttl.map(crate::policy::Ttl::Fixed));
         meta.owner = options.owner;
         meta.ownership = options.ownership;
+        meta.priority = options
+            .priority
+            .unwrap_or_else(|| self.cleanup_policy().priority);
         for (k, v) in options.metadata {
             meta.metadata.insert(k, v);
         }
@@ -717,7 +757,10 @@ mod tests {
 
         let file = ns.create_file("with-default.bin").unwrap();
         let meta = manager.registry().get(file.id()).unwrap();
-        assert_eq!(meta.ttl, Some(Duration::from_secs(3600)));
+        assert_eq!(
+            meta.ttl,
+            Some(crate::policy::Ttl::Fixed(Duration::from_secs(3600)))
+        );
 
         let custom = ns
             .create_file_with(
@@ -726,7 +769,10 @@ mod tests {
             )
             .unwrap();
         let meta = manager.registry().get(custom.id()).unwrap();
-        assert_eq!(meta.ttl, Some(Duration::from_secs(5)));
+        assert_eq!(
+            meta.ttl,
+            Some(crate::policy::Ttl::Fixed(Duration::from_secs(5)))
+        );
         manager.shutdown().unwrap();
     }
 

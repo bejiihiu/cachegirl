@@ -68,6 +68,8 @@ pub struct Namespace {
     shared: Arc<NamespaceShared>,
     quota: RwLock<NamespaceQuota>,
     metadata: Mutex<HashMap<String, String>>,
+    cleanup_policy: RwLock<Option<crate::policy::CleanupPolicy>>,
+    custom_cleanup_policy: RwLock<Option<Arc<dyn crate::policy::CustomCleanupPolicy>>>,
 }
 
 impl Namespace {
@@ -78,6 +80,8 @@ impl Namespace {
             shared,
             quota: RwLock::new(NamespaceQuota::unlimited()),
             metadata: Mutex::new(HashMap::new()),
+            cleanup_policy: RwLock::new(None),
+            custom_cleanup_policy: RwLock::new(None),
         }
     }
 
@@ -130,6 +134,106 @@ impl Namespace {
     /// Read a metadata entry.
     pub fn metadata(&self, key: &str) -> Option<String> {
         self.metadata.lock().ok().and_then(|m| m.get(key).cloned())
+    }
+
+    /// Effective cleanup policy of this namespace.
+    ///
+    /// Returns the namespace-specific policy if one is set, otherwise
+    /// the manager-wide policy, otherwise an unlimited default.
+    pub fn cleanup_policy(&self) -> crate::policy::CleanupPolicy {
+        self.cleanup_policy
+            .read()
+            .ok()
+            .and_then(|guard| *guard)
+            .or_else(|| {
+                self.shared
+                    .cleanup_policy
+                    .read()
+                    .ok()
+                    .and_then(|guard| *guard)
+            })
+            .unwrap_or_default()
+    }
+
+    /// Set or replace the cleanup policy for this namespace.
+    ///
+    /// The policy governs the next cleanup passes: which resources
+    /// expire, aggregate quota eviction within this namespace, and the
+    /// default eviction priority for newly created resources.
+    pub fn set_cleanup_policy(&self, policy: crate::policy::CleanupPolicy) {
+        if let Ok(mut guard) = self.cleanup_policy.write() {
+            *guard = Some(policy);
+        }
+    }
+
+    /// Remove the namespace-specific policy; the namespace falls back
+    /// to the manager-wide policy (or no policy) again.
+    pub fn clear_cleanup_policy(&self) {
+        if let Ok(mut guard) = self.cleanup_policy.write() {
+            *guard = None;
+        }
+    }
+
+    /// Set a custom cleanup policy for this namespace.
+    ///
+    /// The policy is consulted for resources that are not otherwise
+    /// eligible for cleanup; it overrides the manager-wide custom
+    /// policy when both are set. Leases still win over a removal verdict.
+    pub fn set_custom_cleanup_policy(
+        &self,
+        policy: std::sync::Arc<dyn crate::policy::CustomCleanupPolicy>,
+    ) {
+        if let Ok(mut guard) = self.custom_cleanup_policy.write() {
+            *guard = Some(policy);
+        }
+    }
+
+    /// Remove the namespace-specific custom policy, if any.
+    pub fn clear_custom_cleanup_policy(&self) {
+        if let Ok(mut guard) = self.custom_cleanup_policy.write() {
+            *guard = None;
+        }
+    }
+
+    /// Effective custom cleanup policy: namespace-specific if set,
+    /// otherwise the manager-wide one.
+    pub(crate) fn effective_custom_cleanup_policy(
+        &self,
+    ) -> Option<Arc<dyn crate::policy::CustomCleanupPolicy>> {
+        self.custom_cleanup_policy
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .or_else(|| {
+                self.shared
+                    .custom_cleanup_policy
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.clone())
+            })
+    }
+
+    /// Reclaim resources for this namespace and one scope only.
+    ///
+    /// Equivalent to [`crate::TempManager::cleanup_expired`] but scoped to
+    /// this namespace: other namespaces are neither scanned nor evicted,
+    /// and manager-wide limits are not applied. Reports carry the same
+    /// breakdown as manager-wide passes.
+    pub fn cleanup_expired(&self) -> crate::core::error::Result<crate::cleanup::CleanupReport> {
+        crate::cleanup::CleanupEngine::cleanup_namespace(
+            &self.shared,
+            &self.name,
+            self.sweep_view(),
+        )
+    }
+
+    /// Crate-internal view for the cleanup engine.
+    pub(crate) fn sweep_view(&self) -> crate::cleanup::SweepView {
+        crate::cleanup::SweepView {
+            policy: self.cleanup_policy(),
+            custom: self.effective_custom_cleanup_policy(),
+            quota: self.quota(),
+        }
     }
 }
 

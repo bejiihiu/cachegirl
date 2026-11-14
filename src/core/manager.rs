@@ -10,10 +10,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::cleanup::{CleanupEngine, CleanupReport};
+use crate::cleanup::{CleanupEngine, CleanupReport, SweepView};
 use crate::core::error::{ConcurrencyError, ConfigError, Result};
 use crate::namespace::{Backends, Namespace, NamespaceShared, validate_namespace_name};
 use crate::observability::{EventSink, NullSink, Statistics, StatisticsCollector};
+use crate::policy::CleanupPolicy;
 #[cfg(feature = "filesystem")]
 use crate::recovery::RecoveryManager;
 use crate::recovery::RecoveryPolicy;
@@ -184,17 +185,71 @@ impl TempManager {
             .collect())
     }
 
-    /// Reclaim all resources in `Expired` or `PendingCleanup` state.
+    /// Reclaim everything in `Expired` or `PendingCleanup` state and enforce limits.
     ///
-    /// Explicit by design: the application decides when this runs.
-    /// Resources with active leases are never destroyed; they are
-    /// deferred and counted as such in the report.
+    /// The pass expires resources whose TTL has run out (fixed or idle,
+    /// per resource or per policy), applies any configured custom policy,
+    /// then evicts the least valuable live resources (by priority, then
+    /// least-recently-used) until namespace-level and manager-wide quotas
+    /// are satisfied. Explicit by design: the application decides when
+    /// this runs. Resources with active leases are never destroyed; they
+    /// are deferred and counted as such in the report.
     pub fn cleanup_expired(&self) -> Result<CleanupReport> {
-        let engine = CleanupEngine::new(Arc::clone(&self.shared));
-        let report = engine.cleanup()?;
+        let views: HashMap<String, SweepView> = {
+            let namespaces = self
+                .namespaces
+                .lock()
+                .map_err(|_| ConcurrencyError::Poisoned)?;
+            namespaces
+                .iter()
+                .map(|(name, ns)| (name.clone(), ns.sweep_view()))
+                .collect()
+        };
+        let report = CleanupEngine::cleanup_manager(&self.shared, &views)?;
         self.counters
             .record_gc_run(report.removed, report.bytes_freed);
         Ok(report)
+    }
+
+    /// Effective manager-wide cleanup policy.
+    ///
+    /// Returns the configured policy if one is set, otherwise an
+    /// unlimited default.
+    pub fn cleanup_policy(&self) -> CleanupPolicy {
+        self.shared
+            .cleanup_policy
+            .read()
+            .ok()
+            .and_then(|guard| *guard)
+            .unwrap_or_default()
+    }
+
+    /// Set or replace the manager-wide cleanup policy.
+    pub fn set_cleanup_policy(&self, policy: CleanupPolicy) {
+        if let Ok(mut guard) = self.shared.cleanup_policy.write() {
+            *guard = Some(policy);
+        }
+    }
+
+    /// Remove the manager-wide cleanup policy, if any.
+    pub fn clear_cleanup_policy(&self) {
+        if let Ok(mut guard) = self.shared.cleanup_policy.write() {
+            *guard = None;
+        }
+    }
+
+    /// Set or replace the manager-wide custom cleanup policy.
+    pub fn set_custom_cleanup_policy(&self, policy: Arc<dyn crate::policy::CustomCleanupPolicy>) {
+        if let Ok(mut guard) = self.shared.custom_cleanup_policy.write() {
+            *guard = Some(policy);
+        }
+    }
+
+    /// Remove the manager-wide custom cleanup policy, if any.
+    pub fn clear_custom_cleanup_policy(&self) {
+        if let Ok(mut guard) = self.shared.custom_cleanup_policy.write() {
+            *guard = None;
+        }
     }
 
     /// Statistics snapshot for observability.
@@ -252,6 +307,8 @@ pub struct TempManagerBuilder {
     instance_id: Option<String>,
     recovery_policy: RecoveryPolicy,
     event_sink: Arc<dyn EventSink>,
+    cleanup_policy: Option<CleanupPolicy>,
+    custom_cleanup_policy: Option<Arc<dyn crate::policy::CustomCleanupPolicy>>,
 }
 
 impl Default for TempManagerBuilder {
@@ -268,6 +325,8 @@ impl Default for TempManagerBuilder {
             instance_id: None,
             recovery_policy: RecoveryPolicy::default(),
             event_sink: Arc::new(NullSink),
+            cleanup_policy: None,
+            custom_cleanup_policy: None,
         }
     }
 }
@@ -336,6 +395,32 @@ impl TempManagerBuilder {
     /// Where structured lifecycle events are emitted. Default: [`NullSink`].
     pub fn event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
         self.event_sink = sink;
+        self
+    }
+
+    /// Manager-wide cleanup policy: TTL sweep rules, aggregate quota for
+    /// eviction, and the default eviction priority for new resources.
+    ///
+    /// Namespace-specific policies set through
+    /// [`Namespace::set_cleanup_policy`] take precedence for resources of
+    /// that namespace.
+    ///
+    /// [`Namespace::set_cleanup_policy`]: crate::Namespace::set_cleanup_policy
+    pub fn cleanup_policy(mut self, policy: CleanupPolicy) -> Self {
+        self.cleanup_policy = Some(policy);
+        self
+    }
+
+    /// Manager-wide custom cleanup policy, consulted for resources not
+    /// otherwise eligible for reclamation.
+    ///
+    /// Takes effect on the next cleanup pass; namespace-specific custom
+    /// policies override it for their namespace.
+    pub fn custom_cleanup_policy(
+        mut self,
+        policy: Arc<dyn crate::policy::CustomCleanupPolicy>,
+    ) -> Self {
+        self.custom_cleanup_policy = Some(policy);
         self
     }
 
@@ -419,6 +504,8 @@ impl TempManagerBuilder {
             sink: self.event_sink,
             create_lock: Mutex::new(()),
             closed: Arc::clone(&closed),
+            cleanup_policy: std::sync::RwLock::new(self.cleanup_policy),
+            custom_cleanup_policy: std::sync::RwLock::new(self.custom_cleanup_policy),
         });
 
         Ok(TempManager {
