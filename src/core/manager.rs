@@ -250,8 +250,8 @@ impl TempManager {
                 return Err(source);
             }
         };
-        self.counters
-            .record_gc_run(report.removed, report.bytes_freed);
+        // destroy_claimed already accounted for the destroyed resources;
+        // the engine bumps gc_runs itself — nothing to add here
         Ok(report)
     }
 

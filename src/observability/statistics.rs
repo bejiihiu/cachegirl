@@ -71,11 +71,11 @@ impl StatisticsCollector {
     }
 
     /// Record one completed cleanup pass.
-    pub fn record_gc_run(&self, removed: u64, bytes_freed: u64) {
+    ///
+    /// Only bumps the pass counter: the resources reclaimed during the
+    /// pass are accounted for by the destruction path itself.
+    pub fn record_gc_run(&self) {
         self.gc_runs.fetch_add(1, Ordering::Relaxed);
-        self.resources_released
-            .fetch_add(removed, Ordering::Relaxed);
-        self.bytes_freed.fetch_add(bytes_freed, Ordering::Relaxed);
     }
 
     /// Record resources released outside cleanup passes (e.g. explicit release).
@@ -170,7 +170,8 @@ mod tests {
         meta.size_bytes = 100;
         reg.register(meta).unwrap();
         let collector = StatisticsCollector::new();
-        collector.record_gc_run(3, 300);
+        collector.record_gc_run();
+        collector.record_release(3, 300);
         let snap = collector.snapshot("instance-test", 1, &reg).unwrap();
         assert_eq!(snap.resources, 1);
         assert_eq!(snap.bytes_tracked, 100);
@@ -221,9 +222,9 @@ mod tests {
     fn gc_runs_and_plain_releases_accumulate_independently() {
         let reg = Registry::new();
         let collector = StatisticsCollector::new();
-        collector.record_gc_run(2, 100);
-        collector.record_gc_run(3, 200);
-        collector.record_release(1, 50);
+        collector.record_gc_run();
+        collector.record_gc_run();
+        collector.record_release(6, 350);
         let snap = collector.snapshot("instance-test", 1, &reg).unwrap();
         assert_eq!(snap.gc_runs, 2);
         assert_eq!(snap.resources_released, 6);

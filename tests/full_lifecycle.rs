@@ -93,9 +93,12 @@ fn full_lifecycle_from_creation_to_reclamation() {
     let after = manager.stats().unwrap();
     assert_eq!(after.resources, 1);
     assert_eq!(after.gc_runs, 1);
-    // the destroy path counts the released resources and the cleanup pass
-    // reports them once more on top — at minimum they must show up once
-    assert!(after.resources_released >= 2);
+    // destroyed resources are counted exactly once, by the destroy path
+    assert_eq!(after.resources_released, 2);
+    assert_eq!(
+        after.bytes_freed,
+        before.bytes_tracked - after.bytes_tracked
+    );
     assert!(after.bytes_freed >= payload.len() as u64);
     assert_eq!(after.pending_cleanup, 0);
 

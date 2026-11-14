@@ -267,6 +267,9 @@ impl CleanupEngine {
             duration_ms = report.duration.as_millis() as u64,
             "cleanup pass completed"
         );
+        // the pass completed once — bump gc_runs here, not per resource;
+        // destroyed bytes/resources are already counted by the destroy path
+        self.shared.counters.record_gc_run();
         self.shared
             .emit(crate::observability::Event::CleanupCompleted {
                 instance: self.shared.config.instance_id.clone(),
