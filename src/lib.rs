@@ -61,6 +61,8 @@
 #[cfg(test)]
 mod testsupport;
 
+#[cfg(feature = "async")]
+pub mod asynchronous;
 pub mod backend;
 pub mod cleanup;
 pub mod core;
@@ -71,6 +73,8 @@ pub mod policy;
 pub mod recovery;
 pub mod resource;
 
+#[cfg(feature = "async")]
+pub use asynchronous::{AsyncNamespace, AsyncTempManager, AsyncTempManagerBuilder};
 pub use cleanup::{CleanupEngine, CleanupReport, MAX_CLEANUP_ATTEMPTS, RemovalReasons};
 pub use core::error::{
     AccessError, BackendError, CleanupError, ConcurrencyError, ConfigError, Error, QuotaError,

@@ -209,6 +209,9 @@ pub enum ConcurrencyError {
     /// The operation was cancelled.
     #[error("the operation was cancelled")]
     Cancelled,
+    /// A blocking task offloaded to an async runtime panicked.
+    #[error("a blocking task panicked: {0}")]
+    BlockingTaskPanic(String),
     /// The manager has already been shut down.
     #[error("the manager has been shut down")]
     ManagerClosed,
