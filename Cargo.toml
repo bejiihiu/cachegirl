@@ -1,6 +1,6 @@
 [package]
 name = "cachegirl"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Centralized management of temporary resources in Rust: files, buffers, caches, and scratch data with namespaces, quotas, leases, cleanup policies, and crash recovery"
