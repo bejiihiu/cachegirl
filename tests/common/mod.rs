@@ -16,12 +16,18 @@ pub struct TestDir {
 impl TestDir {
     /// Create a fresh directory tagged with the test name.
     pub fn new(tag: &str) -> Self {
+        // nanos alone collide when several tests create their dir inside
+        // the same clock tick — and then one test's drop wipes the other's
+        // root from under it. an atomic counter removes the overlap
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tick = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "cachegirl-e2e-{tag}-{:x}-{}",
+            "cachegirl-e2e-{tag}-{:x}-{}-{}",
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
+            tick,
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
