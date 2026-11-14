@@ -7,11 +7,8 @@ project with a `main.rs`.
 
 ## Installation
 
-Add the crate to `Cargo.toml`:
-
-```toml
-[dependencies]
-cachegirl = { version = "1.0" }
+```sh
+cargo add cachegirl
 ```
 
 The default feature set enables the `filesystem` backend, which is what

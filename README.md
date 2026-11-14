@@ -65,9 +65,8 @@
 
 ## Installation
 
-```toml
-[dependencies]
-cachegirl = { version = "1.0" }
+```sh
+cargo add cachegirl
 ```
 
 ## Documentation
