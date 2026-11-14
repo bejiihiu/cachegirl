@@ -10,11 +10,137 @@ use std::sync::Mutex;
 use crate::core::error::RegistryError;
 use crate::core::lifecycle::ResourceState;
 use crate::core::resource::{ResourceId, ResourceMeta};
+use crate::namespace::NamespaceQuota;
+
+/// Registry state: the map plus the aggregates maintained under the
+/// same lock.
+///
+/// The aggregates are what quota checks consume, so they must always
+/// be consistent with the map — they are updated in the same critical
+/// section as every map mutation.
+#[derive(Default)]
+struct State {
+    map: HashMap<ResourceId, ResourceMeta>,
+    /// (bytes, count) summed over the whole registry.
+    total: (u64, u64),
+    /// (bytes, count) per namespace, keyed by the full namespace path.
+    per_ns: HashMap<String, (u64, u64)>,
+}
+
+fn signed(current: u64, delta: i128) -> u64 {
+    let next = current as i128 + delta;
+    if next <= 0 {
+        0
+    } else if next > u64::MAX as i128 {
+        u64::MAX
+    } else {
+        next as u64
+    }
+}
+
+impl State {
+    fn add(&mut self, meta: &ResourceMeta) {
+        self.total.0 = signed(self.total.0, meta.size_bytes as i128);
+        self.total.1 = signed(self.total.1, 1);
+        let ns = self.per_ns.entry(meta.namespace.clone()).or_insert((0, 0));
+        ns.0 = signed(ns.0, meta.size_bytes as i128);
+        ns.1 = signed(ns.1, 1);
+    }
+
+    fn subtract(&mut self, meta: &ResourceMeta) {
+        self.total.0 = signed(self.total.0, -(meta.size_bytes as i128));
+        self.total.1 = signed(self.total.1, -1);
+        if let Some(ns) = self.per_ns.get_mut(&meta.namespace) {
+            ns.0 = signed(ns.0, -(meta.size_bytes as i128));
+            ns.1 = signed(ns.1, -1);
+            if ns.0 == 0 && ns.1 == 0 {
+                self.per_ns.remove(&meta.namespace);
+            }
+        }
+    }
+
+    fn adjust_bytes(&mut self, namespace: &str, from: u64, to: u64) {
+        if from == to {
+            return;
+        }
+        let delta = to as i128 - from as i128;
+        self.total.0 = signed(self.total.0, delta);
+        if let Some(ns) = self.per_ns.get_mut(namespace) {
+            ns.0 = signed(ns.0, delta);
+        }
+    }
+}
+
+/// Limits for a not-yet-materialized resource, resolved by the caller.
+///
+/// Checked atomically against the registry's internal totals when the
+/// reservation goes in. `scopes` carries the namespace being created
+/// into plus every ancestor, root first; subtree totals (the namespace
+/// itself and all registered descendants) are what a limit is measured
+/// against, so a parent's quota genuinely caps the whole subtree.
+#[derive(Clone, Default)]
+pub(crate) struct QuotaReservation {
+    /// Manager-wide limits (`max_size`, `max_resources`).
+    pub(crate) manager: NamespaceQuota,
+    /// (namespace path, its quota); the sum must hold for every entry.
+    pub(crate) scopes: Vec<(String, NamespaceQuota)>,
+}
+
+/// Which scope rejected a reservation, for observability.
+pub(crate) struct QuotaFailure {
+    /// `"manager"` or the full namespace path that hit the limit.
+    pub(crate) scope: String,
+    /// The concrete limit violation.
+    pub(crate) source: crate::core::error::QuotaError,
+}
+
+/// Why a reservation could not be made.
+pub(crate) enum ReserveFailure {
+    /// A manager-wide or namespace quota would be exceeded.
+    Quota(QuotaFailure),
+    /// The registry itself failed (poisoned or a duplicate id).
+    Registry(RegistryError),
+}
+
+impl From<ReserveFailure> for crate::core::error::Error {
+    fn from(failure: ReserveFailure) -> Self {
+        match failure {
+            ReserveFailure::Quota(failure) => failure.source.into(),
+            ReserveFailure::Registry(source) => source.into(),
+        }
+    }
+}
+
+fn check_scope(
+    quota: NamespaceQuota,
+    scope: &str,
+    current: (u64, u64),
+    added_bytes: u64,
+) -> Result<(), QuotaFailure> {
+    quota
+        .check(scope, current.0, current.1, added_bytes)
+        .map_err(|source| QuotaFailure {
+            scope: scope.to_owned(),
+            source,
+        })
+}
+
+fn subtree_sums(per_ns: &HashMap<String, (u64, u64)>, prefix: &str) -> (u64, u64) {
+    let mut bytes = 0u64;
+    let mut count = 0u64;
+    for (ns, &(b, c)) in per_ns {
+        if crate::namespace::namespace_is_subtree(ns, prefix) {
+            bytes = bytes.saturating_add(b);
+            count = count.saturating_add(c);
+        }
+    }
+    (bytes, count)
+}
 
 /// Shared, thread-safe registry of [`ResourceMeta`] records.
 #[derive(Default)]
 pub struct Registry {
-    inner: Mutex<HashMap<ResourceId, ResourceMeta>>,
+    inner: Mutex<State>,
 }
 
 impl Registry {
@@ -25,18 +151,21 @@ impl Registry {
 
     /// Register a new resource. Fails if the id is already present.
     pub fn register(&self, meta: ResourceMeta) -> Result<(), RegistryError> {
-        let mut map = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
-        if map.contains_key(&meta.id) {
+        let mut state = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
+        if state.map.contains_key(&meta.id) {
             return Err(RegistryError::AlreadyRegistered(meta.id));
         }
-        map.insert(meta.id.clone(), meta);
+        state.add(&meta);
+        state.map.insert(meta.id.clone(), meta);
         Ok(())
     }
 
     /// Fetch a snapshot of a resource's metadata.
     pub fn get(&self, id: &ResourceId) -> Result<ResourceMeta, RegistryError> {
-        let map = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
-        map.get(id)
+        let state = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
+        state
+            .map
+            .get(id)
             .cloned()
             .ok_or_else(|| RegistryError::NotFound(id.clone()))
     }
@@ -47,12 +176,28 @@ impl Registry {
         id: &ResourceId,
         f: impl FnOnce(&mut ResourceMeta),
     ) -> Result<ResourceMeta, RegistryError> {
-        let mut map = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
-        let meta = map
-            .get_mut(id)
-            .ok_or_else(|| RegistryError::NotFound(id.clone()))?;
-        f(meta);
-        Ok(meta.clone())
+        let mut state = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
+        let before = state
+            .map
+            .get(id)
+            .ok_or_else(|| RegistryError::NotFound(id.clone()))?
+            .size_bytes;
+        {
+            let meta = state
+                .map
+                .get_mut(id)
+                .ok_or_else(|| RegistryError::NotFound(id.clone()))?;
+            f(meta);
+        }
+        let (namespace, after) = {
+            let meta = state
+                .map
+                .get(id)
+                .ok_or_else(|| RegistryError::NotFound(id.clone()))?;
+            (meta.namespace.clone(), meta.size_bytes)
+        };
+        state.adjust_bytes(&namespace, before, after);
+        Ok(state.map.get(id).cloned().unwrap())
     }
 
     /// Move a resource to a new lifecycle state, validating the transition.
@@ -61,8 +206,9 @@ impl Registry {
         id: &ResourceId,
         next: ResourceState,
     ) -> Result<ResourceState, RegistryError> {
-        let mut map = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
-        let meta = map
+        let mut state = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
+        let meta = state
+            .map
             .get_mut(id)
             .ok_or_else(|| RegistryError::NotFound(id.clone()))?;
         let from = meta.state;
@@ -73,9 +219,13 @@ impl Registry {
 
     /// Remove a resource from the registry and return its last record.
     pub fn remove(&self, id: &ResourceId) -> Result<ResourceMeta, RegistryError> {
-        let mut map = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
-        map.remove(id)
-            .ok_or_else(|| RegistryError::NotFound(id.clone()))
+        let mut state = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
+        let meta = state
+            .map
+            .remove(id)
+            .ok_or_else(|| RegistryError::NotFound(id.clone()))?;
+        state.subtract(&meta);
+        Ok(meta)
     }
 
     /// Number of registered resources.
@@ -84,6 +234,7 @@ impl Registry {
             .inner
             .lock()
             .map_err(|_| RegistryError::Poisoned)?
+            .map
             .len())
     }
 
@@ -94,8 +245,8 @@ impl Registry {
 
     /// Snapshot every registered resource.
     pub fn snapshot(&self) -> Result<Vec<ResourceMeta>, RegistryError> {
-        let map = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
-        Ok(map.values().cloned().collect())
+        let state = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
+        Ok(state.map.values().cloned().collect())
     }
 
     /// Snapshot resources in a single namespace.
@@ -107,11 +258,99 @@ impl Registry {
             .collect())
     }
 
+    /// Snapshot this namespace and all registered descendants.
+    pub(crate) fn snapshot_subtree(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<ResourceMeta>, RegistryError> {
+        Ok(self
+            .snapshot()?
+            .into_iter()
+            .filter(|m| crate::namespace::namespace_is_subtree(&m.namespace, namespace))
+            .collect())
+    }
+
     /// Total tracked size across all resources, in bytes.
     pub fn total_bytes(&self) -> Result<u64, RegistryError> {
-        Ok(crate::core::saturating_bytes(
-            self.snapshot()?.iter().map(|m| m.size_bytes),
-        ))
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| RegistryError::Poisoned)?
+            .total
+            .0)
+    }
+
+    /// Atomically check the given quotas and insert `meta` as a
+    /// `Uninitialized` reservation.
+    ///
+    /// The check covers the manager-wide limit and every scope in
+    /// `quotas` (the creating namespace and its ancestors), measuring
+    /// subtree totals. Either everything is inserted and returned, or
+    /// nothing changes.
+    pub(crate) fn reserve(
+        &self,
+        meta: ResourceMeta,
+        quotas: &QuotaReservation,
+    ) -> Result<(), ReserveFailure> {
+        if meta.state != ResourceState::Uninitialized {
+            // reservations are always placeholders; that is what makes
+            // the refunded slot unambiguous on failure
+            return Err(ReserveFailure::Registry(RegistryError::InvalidTransition {
+                from: meta.state,
+                to: ResourceState::Created,
+            }));
+        }
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| ReserveFailure::Registry(RegistryError::Poisoned))?;
+        if state.map.contains_key(&meta.id) {
+            return Err(ReserveFailure::Registry(RegistryError::AlreadyRegistered(
+                meta.id,
+            )));
+        }
+        let added = meta.size_bytes;
+        check_scope(quotas.manager, "manager", state.total, added)
+            .map_err(ReserveFailure::Quota)?;
+        for (scope, quota) in &quotas.scopes {
+            let sums = subtree_sums(&state.per_ns, scope);
+            check_scope(*quota, scope, sums, added).map_err(ReserveFailure::Quota)?;
+        }
+        state.add(&meta);
+        state.map.insert(meta.id.clone(), meta);
+        Ok(())
+    }
+
+    /// Turn a reservation into a live record, without consuming `meta`.
+    ///
+    /// The record must still be in `Uninitialized` state and carry the
+    /// id minted at reservation time. The size moves from the reserved
+    /// hint to the backend's real number and the lifecycle moves to
+    /// `Created` — all under one lock.
+    pub(crate) fn publish(&self, meta: &ResourceMeta) -> Result<ResourceMeta, RegistryError> {
+        let mut state = self.inner.lock().map_err(|_| RegistryError::Poisoned)?;
+        let (from, before, ns) = {
+            let old = state
+                .map
+                .get(&meta.id)
+                .ok_or_else(|| RegistryError::NotFound(meta.id.clone()))?;
+            (old.state, old.size_bytes, old.namespace.clone())
+        };
+        if from != ResourceState::Uninitialized {
+            return Err(RegistryError::InvalidTransition {
+                from,
+                to: ResourceState::Created,
+            });
+        }
+        state.adjust_bytes(&ns, before, meta.size_bytes);
+        let mut stored = meta.clone();
+        stored.state = ResourceState::Created;
+        let old = state
+            .map
+            .get_mut(&meta.id)
+            .ok_or_else(|| RegistryError::NotFound(meta.id.clone()))?;
+        *old = stored.clone();
+        Ok(stored)
     }
 }
 

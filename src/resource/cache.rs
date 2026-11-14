@@ -81,26 +81,32 @@ impl CacheStore {
         Self::default()
     }
 
-    pub(crate) fn contains(&self, namespace: &str, key: &str) -> bool {
-        self.entries
-            .lock()
-            .map(|m| m.contains_key(&(namespace.to_owned(), key.to_owned())))
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn insert(
+    /// Insert only if the key is free; atomically decides the verdict.
+    ///
+    /// Returns true when the entry was stored, false when the key was
+    /// already taken. The check and the excitation happen under one
+    /// lock hold, so two concurrent creators of the same key cannot
+    /// both win.
+    pub(crate) fn insert_if_absent(
         &self,
         namespace: &str,
         key: &str,
         id: ResourceId,
         entry: SharedEntry,
-    ) -> Option<StoredCacheEntry> {
-        self.entries.lock().ok().and_then(|mut m| {
-            m.insert(
-                (namespace.to_owned(), key.to_owned()),
-                StoredCacheEntry { id, entry },
+    ) -> bool {
+        use std::collections::hash_map::Entry;
+        self.entries
+            .lock()
+            .map(
+                |mut m| match m.entry((namespace.to_owned(), key.to_owned())) {
+                    Entry::Occupied(_) => false,
+                    Entry::Vacant(slot) => {
+                        slot.insert(StoredCacheEntry { id, entry });
+                        true
+                    }
+                },
             )
-        })
+            .unwrap_or(false)
     }
 
     pub(crate) fn get(&self, namespace: &str, key: &str) -> Option<StoredCacheEntry> {
@@ -242,30 +248,24 @@ mod tests {
         let store = CacheStore::new();
         let id = ResourceId::new();
         let entry = Arc::new(Mutex::new(CacheEntry::new("k", vec![1])));
-        store.insert("ns-a", "k", id.clone(), Arc::clone(&entry));
-        assert!(store.contains("ns-a", "k"));
-        assert!(!store.contains("ns-b", "k"));
+        assert!(store.insert_if_absent("ns-a", "k", id.clone(), Arc::clone(&entry)));
+        assert!(!store.insert_if_absent("ns-a", "k", id.clone(), Arc::clone(&entry)));
+        assert!(store.get("ns-a", "k").is_some());
         assert!(store.get("ns-b", "k").is_none());
         assert!(store.remove("ns-b", "k").is_none());
         assert!(store.get("ns-a", "k").is_some());
     }
 
     #[test]
-    fn reinserting_a_key_hands_back_the_previous_entry() {
+    fn insert_if_absent_reports_a_taken_key_and_changes_nothing() {
         let store = CacheStore::new();
         let first_id = ResourceId::new();
         let second_id = ResourceId::new();
         let entry = Arc::new(Mutex::new(CacheEntry::new("k", vec![1])));
-        let previous = store.insert("ns", "k", first_id.clone(), Arc::clone(&entry));
-        assert!(
-            previous.is_none(),
-            "first insert must not report a previous entry"
-        );
-        let previous = store
-            .insert("ns", "k", second_id.clone(), Arc::clone(&entry))
-            .expect("re-insert must return the evicted slot");
-        assert_eq!(previous.id, first_id);
-        assert_eq!(store.get("ns", "k").unwrap().id, second_id);
+        assert!(store.insert_if_absent("ns", "k", first_id.clone(), Arc::clone(&entry)));
+        assert!(!store.insert_if_absent("ns", "k", second_id.clone(), Arc::clone(&entry)));
+        // the original slot is untouched by the losing creator
+        assert_eq!(store.get("ns", "k").unwrap().id, first_id);
     }
 
     #[test]
@@ -273,10 +273,10 @@ mod tests {
         let store = CacheStore::new();
         let id = ResourceId::new();
         let entry = Arc::new(Mutex::new(CacheEntry::new("k", vec![9, 8])));
-        store.insert("ns", "k", id.clone(), entry);
+        assert!(store.insert_if_absent("ns", "k", id.clone(), entry));
         let removed = store.remove("ns", "k").expect("entry must be removable");
         assert_eq!(removed.id, id);
-        assert!(!store.contains("ns", "k"));
+        assert!(store.get("ns", "k").is_none());
         assert!(store.remove("ns", "k").is_none());
     }
 }

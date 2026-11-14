@@ -5,6 +5,72 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Nested namespaces.** `TempManager::namespace("parent/sub")` and
+  `Namespace::namespace("sub")` create hierarchical namespaces. Names
+  are full paths (`parent/sub`), hierarchy is limited to
+  `namespace::MAX_NAMESPACE_DEPTH` (8) levels, every level is registered
+  with the manager and materialized on disk under
+  `root/<instance>/<path>/`, and quotas/cleanup/statistics see each
+  level separately. New accessors `Namespace::depth`, `parent` and
+  `usage_recursive` (exact-match `usage` still exists).
+  - Per-resource access (`release`, `resources`, `usage`, `cache_get`)
+    stays exact-match — absolute isolation between namespaces.
+  - Quotas recurse: a namespace's bytes/count quota limits the total of
+    its entire subtree; enforcement happens at creation against every
+    ancestor, atomically, in the registry.
+  - Namespace-scoped cleanup recurses: a pass on a parent reclaims the
+    parent and every namespace registered under it, each leveled against
+    its own policy; ancestor quota eviction picks victims from the
+    subtree. Read-only operations (`resources`, `usage`, `release`) do
+    NOT recurse.
+  - Children inherit nothing: no quota values, no policies; each level
+    falls back to the manager-wide defaults only.
+- **Lease-aware shutdown.** `TempManagerBuilder::shutdown_wait_leases`
+  (also in `ManagerConfig` and the async builder): shutdown blocks
+  until every lease is dropped or the timeout elapses (default `ZERO`,
+  do not wait). Resources whose destruction is lease-blocked stay in
+  `PendingCleanup` and are counted in the shutdown report's `deferred`.
+  Leases are how the library tracks in-flight operations; it does not
+  track arbitrary application code — operations that must be seen by
+  shutdown must hold a lease.
+- **Instance directory removal on shutdown** (opt-in).
+  `TempManagerBuilder::remove_instance_dir_on_shutdown(bool)` (also in
+  `ManagerConfig` and the async builder): after the sweep, shutdown
+  deletes `root/<instance>` wholesale. The path must canonically
+  resolve strictly inside the canonicalized root — the root itself, a
+  planted symlink, or anything resolving at or above the root is
+  refused with an error instead of deleting data. Default: off.
+
+### Changed
+
+- Resource creation no longer passes through one global creation mutex.
+  Quota enforcement is an atomic reservation inside the registry: a
+  placeholder record is inserted under the registry lock after the
+  manager-wide and every ancestor's quota are checked against internal
+  subtree totals. Different namespaces create fully in parallel; a
+  shared-quota scope (same namespace, ancestors, or the manager) cannot
+  overshoot. Registry totals are maintained incrementally, so out-of-band
+  registry mutations can no longer skew quota accounting.
+- Namespace-scoped cleanup (`Namespace::cleanup_expired`) now sweeps the
+  namespace and every registered descendant. Isolation for per-resource
+  operations is unchanged.
+- Filesystem backend accepts namespace paths (`parent/sub`) and
+  materializes the whole subtree confined inside the root, validating
+  every path segment.
+
+### Security
+
+- Instance directory removal on shutdown is confined to the
+  canonicalized root: the canonical target is removed, never a planted
+  symlink at the instance path, and never anything at or above the root.
+- Creation-time quota accounting replaces the creation mutex with a
+  registry-atomic reservation, eliminating a check-then-act race that
+  could overshoot shared quotas under concurrent creation.
+
 ## [1.0.0] - 2026-11-14
 
 Initial public release.

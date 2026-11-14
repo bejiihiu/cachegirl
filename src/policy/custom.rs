@@ -19,7 +19,8 @@ use crate::core::resource::ResourceMeta;
 pub enum CleanupScope {
     /// Whole manager: every namespace, manager-wide limits enforced.
     Manager,
-    /// A single namespace, its own limits and policy enforced.
+    /// A namespace and every namespace registered under it; that
+    /// subtree's limits and policies are enforced.
     Namespace(String),
 }
 

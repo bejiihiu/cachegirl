@@ -113,15 +113,18 @@ impl CleanupEngine {
         self.run(CleanupScope::Manager, &HashMap::new())
     }
 
-    /// Scoped pass: sweep and evict within one namespace only.
-    pub(crate) fn cleanup_namespace(
+    /// Scoped pass: sweep this namespace and all registered descendants.
+    ///
+    /// `views` carries the policy/quota of every namespace in the
+    /// subtree; `root` selects the subtree. Views for namespaces whose
+    /// sweep is decided by a parent's deletion verdict are still honored
+    /// for their own resources (each level sweeps by its own policy).
+    pub(crate) fn cleanup_subtree(
         shared: &Arc<NamespaceShared>,
-        namespace: &str,
-        view: SweepView,
+        root: &str,
+        views: HashMap<String, SweepView>,
     ) -> Result<CleanupReport, Error> {
-        let mut views = HashMap::new();
-        views.insert(namespace.to_owned(), view);
-        Self::new(Arc::clone(shared)).run(CleanupScope::Namespace(namespace.to_owned()), &views)
+        Self::new(Arc::clone(shared)).run(CleanupScope::Namespace(root.to_owned()), &views)
     }
 
     /// Manager-wide pass with per-namespace views resolved by the caller.
@@ -163,7 +166,9 @@ impl CleanupEngine {
 
         let in_scope = |meta: &ResourceMeta| match &scope {
             CleanupScope::Manager => true,
-            CleanupScope::Namespace(name) => &meta.namespace == name,
+            CleanupScope::Namespace(name) => {
+                crate::namespace::namespace_is_subtree(&meta.namespace, name)
+            }
         };
 
         // -- phase A: expiry, custom policy, pre-marked eligibility ---------
@@ -285,11 +290,14 @@ impl CleanupEngine {
 fn snapshot(registry: &Registry, scope: &CleanupScope) -> Result<Vec<ResourceMeta>, Error> {
     match scope {
         CleanupScope::Manager => Ok(registry.snapshot()?),
-        CleanupScope::Namespace(name) => Ok(registry.snapshot_namespace(name)?),
+        CleanupScope::Namespace(name) => Ok(registry.snapshot_subtree(name)?),
     }
 }
 
 /// Resources that may still be evicted: live, not pre-marked for cleanup.
+///
+/// `namespace: Some(name)` selects the whole subtree below `name` (the
+/// same semantics as the sweep phase), `None` selects everything.
 fn live_candidates(
     registry: &Registry,
     scope: &CleanupScope,
@@ -297,7 +305,7 @@ fn live_candidates(
 ) -> Result<Vec<ResourceMeta>, Error> {
     let mut metas = snapshot(registry, scope)?;
     if let Some(name) = namespace {
-        metas.retain(|m| m.namespace == name);
+        metas.retain(|m| crate::namespace::namespace_is_subtree(&m.namespace, name));
     }
     metas.retain(|m| {
         matches!(

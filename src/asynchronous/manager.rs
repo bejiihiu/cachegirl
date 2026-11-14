@@ -183,9 +183,12 @@ impl AsyncTempManager {
 
     /// Shut the manager down.
     ///
-    /// Blocks new namespace creation, optionally sweeps expired resources
-    /// (`cleanup_on_shutdown`), and removes this instance's lock file.
-    /// Safe to call more than once. Runs on the blocking pool under Tokio.
+    /// Blocks new operations, waits for active leases when
+    /// `shutdown_wait_leases` is set, optionally sweeps expired resources
+    /// (`cleanup_on_shutdown`), removes this instance's lock file, and
+    /// deletes this instance's directory when
+    /// `remove_instance_dir_on_shutdown` is set. Safe to call more than
+    /// once. Runs on the blocking pool under Tokio.
     pub async fn shutdown(&self) -> Result<CleanupReport> {
         let inner = Arc::clone(&self.inner);
         offload(move || inner.shutdown()).await
@@ -218,6 +221,23 @@ impl AsyncTempManagerBuilder {
     /// Reclaim stale instance data from crashed runs when the manager starts.
     pub fn cleanup_on_start(mut self, cleanup: bool) -> Self {
         self.inner = self.inner.cleanup_on_start(cleanup);
+        self
+    }
+
+    /// Delete this instance's whole directory (`root/<instance>`) on shutdown.
+    /// Default: false. The removal is confined to the canonicalized root;
+    /// anything that does not canonically resolve strictly inside it is refused.
+    pub fn remove_instance_dir_on_shutdown(mut self, remove: bool) -> Self {
+        self.inner = self.inner.remove_instance_dir_on_shutdown(remove);
+        self
+    }
+
+    /// How long shutdown waits for active leases before sweeping.
+    /// Default: zero — shutdown never waits. Leases are how the library
+    /// tracks operations still in flight; operations that must be seen
+    /// by shutdown must hold a lease.
+    pub fn shutdown_wait_leases(mut self, timeout: Duration) -> Self {
+        self.inner = self.inner.shutdown_wait_leases(timeout);
         self
     }
 

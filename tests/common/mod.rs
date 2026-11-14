@@ -56,12 +56,12 @@ pub fn backdate(manager: &cachegirl::TempManager, id: &cachegirl::ResourceId, se
 
 /// Hard two-way agreement between the registry and the on-disk layout.
 ///
-/// Every file or directory directly inside a namespace directory must be
-/// registered, and every registered filesystem resource must exist on
-/// disk. The instance lock at the instance root is ignored; anything
-/// else outside a namespace directory is reported as an orphan. Content
-/// nested inside a directory resource is the application's business and
-/// is not tracked here.
+/// Every file anywhere under the instance directory must be registered,
+/// and every registered filesystem resource must exist on disk. Nested
+/// namespaces are walked recursively; directory resources (registered
+/// with kind `Directory`) own their content, so their contents are not
+/// tracked. The instance lock at the instance root is ignored; anything
+/// else outside a namespace directory is reported as an orphan.
 pub fn assert_disk_matches_registry(manager: &cachegirl::TempManager) {
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -82,32 +82,42 @@ pub fn assert_disk_matches_registry(manager: &cachegirl::TempManager) {
         .filter_map(|m| m.metadata.get("path").map(PathBuf::from))
         .map(|p| canon(&p))
         .collect();
+    let registered_dirs: HashSet<PathBuf> = metas
+        .iter()
+        .filter(|m| m.kind == cachegirl::ResourceKind::Directory)
+        .filter_map(|m| m.metadata.get("path").map(PathBuf::from))
+        .map(|p| canon(&p))
+        .collect();
 
     let instance_dir = manager.root().join(manager.instance_id());
     let instance_dir =
         std::fs::canonicalize(&instance_dir).unwrap_or_else(|_| instance_dir.clone());
+    let instance_root = instance_dir.clone();
     let mut on_disk: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(&instance_dir)
-        .unwrap_or_else(|e| panic!("instance dir {instance_dir:?} unreadable: {e}"))
-        .flatten()
-    {
-        let name = entry.file_name();
-        if name == ".cachegirl.lock" {
-            continue;
-        }
-        let path = entry.path();
-        let is_dir = std::fs::symlink_metadata(&path)
-            .map(|m| m.is_dir())
-            .unwrap_or(false);
-        if is_dir {
-            for child in std::fs::read_dir(&path)
-                .unwrap_or_else(|e| panic!("namespace dir {path:?} unreadable: {e}"))
-                .flatten()
-            {
-                on_disk.push(child.path());
+    let mut stack = vec![instance_dir];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("instance dir {dir:?} unreadable: {e}"))
+            .flatten()
+        {
+            let name = entry.file_name();
+            if dir == instance_root && name == ".cachegirl.lock" {
+                continue;
             }
-        } else {
-            panic!("unexpected entry at the instance root: {path:?}");
+            let path = entry.path();
+            let is_dir = std::fs::symlink_metadata(&path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            if is_dir {
+                // a registered directory resource owns its content; a
+                // namespace directory is just another level to descend
+                if registered_dirs.contains(&canon(&path)) {
+                    continue;
+                }
+                stack.push(path);
+            } else {
+                on_disk.push(path);
+            }
         }
     }
 

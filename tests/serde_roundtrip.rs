@@ -334,6 +334,8 @@ fn manager_config_roundtrip() {
         instance_id: "instance-test".to_string(),
         recovery_policy: RecoveryPolicy::ReportOnly,
         stale_instance_after: Duration::from_secs(600),
+        remove_instance_dir_on_shutdown: true,
+        shutdown_wait_leases: Duration::from_secs(5),
     };
     assert_eq!(roundtrip(&config), config);
 }
@@ -355,6 +357,8 @@ fn manager_config_written_with_only_required_fields_loads_with_defaults() {
     assert_eq!(config.symlink_policy, SymlinkPolicy::Reject);
     assert_eq!(config.recovery_policy, RecoveryPolicy::OnStartup);
     assert_eq!(config.stale_instance_after, Duration::from_secs(3600));
+    assert!(!config.remove_instance_dir_on_shutdown);
+    assert_eq!(config.shutdown_wait_leases, Duration::ZERO);
 
     // missing root must be an error, not a silent empty path
     let json = serde_json::json!({ "instance_id": "instance-test" });

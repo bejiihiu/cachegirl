@@ -63,22 +63,36 @@ fn expect_resource_name(name: &str) -> bool {
     !is_reserved_device(name)
 }
 
-fn expect_namespace_name(name: &str) -> bool {
-    let trimmed = name.trim();
-    if trimmed.is_empty() || trimmed != name || name == "." || name == ".." {
+fn expect_namespace_segment(segment: &str) -> bool {
+    let trimmed = segment.trim();
+    if trimmed.is_empty() || trimmed != segment || segment == "." || segment == ".." {
         return false;
     }
-    if name.contains(['/', '\\']) {
+    if segment.contains(['/', '\\']) {
         return false;
     }
-    if name.ends_with('.') {
+    if segment.ends_with('.') {
         return false;
     }
-    if is_reserved_device(name) {
+    if is_reserved_device(segment) {
         return false;
     }
-    name.chars()
+    segment
+        .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn expect_namespace_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let segments: Vec<&str> = name.split('/').collect();
+    if segments.len() > cachegirl::namespace::MAX_NAMESPACE_DEPTH {
+        return false;
+    }
+    segments
+        .iter()
+        .all(|segment| expect_namespace_segment(segment))
 }
 
 fn expect_instance_id(id: &str) -> bool {

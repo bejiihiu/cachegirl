@@ -3,13 +3,40 @@
 //! Every resource lives in exactly one namespace. Namespaces carry
 //! their own quota and metadata, and can never touch resources that
 //! belong to a different namespace through this API.
+//!
+//! ## Nested namespaces
+//!
+//! A namespace can hold child namespaces: `manager.namespace("parent/sub")`
+//! creates (or returns) `sub` inside `parent`, and `parent_ns.namespace("sub")`
+//! does the same thing. The child's [`Namespace::name`] is the full path
+//! (`parent/sub`), resources materialize under `root/<instance>/parent/sub/`,
+//! and hierarchy depth is capped at [`MAX_NAMESPACE_DEPTH`] levels.
+//!
+//! The semantics, deliberately:
+//!
+//! - **Per-resource isolation stays absolute.** [`Namespace::release`],
+//!   [`Namespace::resources`], [`Namespace::usage`] and `cache_get` see
+//!   only the namespace itself — never the parent, never the children.
+//! - **Quotas recurse.** A namespace's quota limits the bytes and the
+//!   resource count of its whole subtree (the namespace itself and all
+//!   descendants). Checks run at creation against every ancestor, so a
+//!   child can never grow past what its parent or the manager allows.
+//! - **Cleanup recurses.** `ns.cleanup_expired()` reclaims the namespace
+//!   and every namespace registered below it. Each namespace's own
+//!   policy governs its own resources; ancestor quota eviction picks
+//!   victims from the whole subtree when the ancestor is over its limit.
+//! - **Nothing is inherited.** Children do not inherit the parent's
+//!   quota value or cleanup policy; each level falls back to the
+//!   manager-wide defaults only.
 
 mod create;
 mod quota;
+mod reservation;
 mod shared;
 
 pub use create::CreateOptions;
 pub use quota::NamespaceQuota;
+pub(crate) use reservation::{Reservation, ReserveFailure};
 #[cfg(test)]
 pub(crate) use shared::test_shared;
 pub(crate) use shared::{Backends, NamespaceShared};
@@ -60,6 +87,51 @@ pub(crate) fn validate_namespace_name(name: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// The maximum nesting depth of a namespace path, in segments.
+///
+/// Top-level namespaces live at depth 1; `parent/sub` is depth 2.
+/// Deeper hierarchies are rejected with
+/// [`ConfigError::InvalidNamespaceName`].
+pub const MAX_NAMESPACE_DEPTH: usize = 8;
+
+/// Validate a namespace path: split on `/`, validate every segment.
+///
+/// Returns the validated segments. Empty segments, `.`/`..`, trailing
+/// dots, control characters and anything outside the namespace charset
+/// are rejected per segment; the total depth must not exceed
+/// [`MAX_NAMESPACE_DEPTH`]. A plain flat name is a valid path of one
+/// segment.
+pub(crate) fn validate_namespace_path(path: &str) -> Result<Vec<&str>, ConfigError> {
+    if path.is_empty() {
+        return Err(ConfigError::InvalidNamespaceName(path.to_owned()));
+    }
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        // every failure echoes the full path, not the offending segment,
+        // so callers can point at what was actually rejected
+        validate_namespace_name(segment)
+            .map_err(|_| ConfigError::InvalidNamespaceName(path.to_owned()))?;
+        segments.push(segment);
+        if segments.len() > MAX_NAMESPACE_DEPTH {
+            return Err(ConfigError::InvalidNamespaceName(path.to_owned()));
+        }
+    }
+    Ok(segments)
+}
+
+/// True when `candidate` is `ancestor` itself or registered underneath it.
+///
+/// Matches on path segment boundaries only: `a/b` is inside `a`,
+/// `a/bc` is not.
+pub(crate) fn namespace_is_subtree(candidate: &str, ancestor: &str) -> bool {
+    if candidate == ancestor {
+        return true;
+    }
+    candidate
+        .strip_prefix(ancestor)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// Validate a resource name: non-empty, no traversal, no control characters.
 ///
 /// `:` is rejected (on NTFS it silently denotes an alternate data stream)
@@ -93,6 +165,11 @@ pub(crate) fn validate_resource_name(name: &str) -> Result<(), AccessError> {
 /// namespace shares its manager's registry, backends and quota
 /// plumbing through an internal reference created at `TempManager`
 /// build time.
+///
+/// The namespace's [`Namespace::name`] is the full path within the
+/// hierarchy: `protocol` for a top-level namespace, `protocol/tls` for
+/// a child of `protocol`. See the module docs for the nested-namespace
+/// semantics (isolation, quotas, cleanup).
 pub struct Namespace {
     name: String,
     registry: Arc<Registry>,
@@ -121,9 +198,46 @@ impl Namespace {
         &self.shared
     }
 
-    /// Namespace name.
+    /// Namespace name: the full path within the hierarchy
+    /// (`protocol`, `parent/sub`).
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Nesting depth of this namespace: 1 for top-level, 2 for a direct
+    /// child, and so on up to [`MAX_NAMESPACE_DEPTH`].
+    pub fn depth(&self) -> usize {
+        self.name.split('/').count()
+    }
+
+    /// Path of the parent namespace, or `None` for a top-level namespace.
+    pub fn parent(&self) -> Option<&str> {
+        self.name.rsplit_once('/').map(|(parent, _)| parent)
+    }
+
+    /// Create or return a child namespace under this one.
+    ///
+    /// `name` must be a single segment with the same charset rules as
+    /// top-level namespaces. The child's path is `<this>/<name>`; it is
+    /// registered with the manager (so manager-wide cleanup, statistics
+    /// and quota enforcement see it), created on disk under
+    /// `root/<instance>/<this>/<name>/` (without the `filesystem`
+    /// feature no directories are made), and returned to the caller.
+    /// Creating the same child twice returns the same namespace.
+    ///
+    /// Errors:
+    /// - [`ConfigError::InvalidNamespaceName`] if `name` is not a single
+    ///   valid segment, or the nesting limit [`MAX_NAMESPACE_DEPTH`]
+    ///   would be exceeded;
+    /// - [`crate::ConcurrencyError::ManagerClosed`] after shutdown.
+    pub fn namespace(&self, name: &str) -> crate::core::error::Result<Arc<Namespace>> {
+        validate_namespace_name(name)?;
+        let parent_depth = self.depth();
+        if parent_depth >= MAX_NAMESPACE_DEPTH {
+            return Err(ConfigError::InvalidNamespaceName(format!("{}/{name}", self.name)).into());
+        }
+        let full = format!("{}/{name}", self.name);
+        self.shared().get_or_create_namespace(&full)
     }
 
     /// Current quota for this namespace.
@@ -141,9 +255,25 @@ impl Namespace {
         }
     }
 
-    /// Current usage: bytes and live resource count.
+    /// Current usage: bytes and live resource count for this namespace
+    /// only — descendants are not included (isolation stays absolute).
+    /// Use [`Namespace::usage_recursive`] for the subtree total.
+    ///
+    /// Records reserved by in-flight creations are included, with the
+    /// requested size at reservation time.
     pub fn usage(&self) -> crate::core::error::Result<(u64, u64)> {
         let items = self.registry.snapshot_namespace(&self.name)?;
+        let bytes = crate::core::saturating_bytes(items.iter().map(|m| m.size_bytes));
+        Ok((bytes, items.len() as u64))
+    }
+
+    /// Total usage of this namespace and every registered descendant
+    /// combined: bytes and live resource count.
+    ///
+    /// Records reserved by in-flight creations are included, with the
+    /// requested size at reservation time.
+    pub fn usage_recursive(&self) -> crate::core::error::Result<(u64, u64)> {
+        let items = self.registry.snapshot_subtree(&self.name)?;
         let bytes = crate::core::saturating_bytes(items.iter().map(|m| m.size_bytes));
         Ok((bytes, items.len() as u64))
     }
@@ -244,18 +374,30 @@ impl Namespace {
             })
     }
 
-    /// Reclaim resources for this namespace and one scope only.
+    /// Reclaim resources for this namespace and every namespace
+    /// registered under it.
     ///
-    /// Equivalent to [`crate::TempManager::cleanup_expired`] but scoped to
-    /// this namespace: other namespaces are neither scanned nor evicted,
-    /// and manager-wide limits are not applied. Reports carry the same
-    /// breakdown as manager-wide passes.
+    /// Equivalent to [`crate::TempManager::cleanup_expired`] but scoped
+    /// to this subtree: other branches of the hierarchy are neither
+    /// scanned nor evicted, and manager-wide limits are not applied.
+    /// Each namespace in the subtree sweeps against its own policy, and
+    /// quota eviction for ancestors picks victims from the whole
+    /// subtree when the ancestor is over its limit. Reports carry the
+    /// same breakdown as manager-wide passes.
     pub fn cleanup_expired(&self) -> crate::core::error::Result<crate::cleanup::CleanupReport> {
-        crate::cleanup::CleanupEngine::cleanup_namespace(
-            &self.shared,
-            &self.name,
-            self.sweep_view(),
-        )
+        let mut views = HashMap::new();
+        views.insert(self.name.clone(), self.sweep_view());
+        if let Some(map) = self.shared().namespaces.upgrade() {
+            if let Ok(guard) = map.lock() {
+                let prefix = format!("{}/", self.name);
+                for (name, ns) in guard.iter() {
+                    if name != &self.name && name.starts_with(prefix.as_str()) {
+                        views.insert(name.clone(), ns.sweep_view());
+                    }
+                }
+            }
+        }
+        crate::cleanup::CleanupEngine::cleanup_subtree(&self.shared, &self.name, views)
     }
 
     /// Crate-internal view for the cleanup engine.

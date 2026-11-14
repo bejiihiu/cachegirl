@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::cleanup::{CleanupEngine, CleanupReport, SweepView};
 use crate::core::error::{ConcurrencyError, ConfigError, Result};
-use crate::namespace::{Backends, Namespace, NamespaceShared, validate_namespace_name};
+use crate::namespace::{Backends, Namespace, NamespaceShared, validate_namespace_path};
 use crate::observability::{EventSink, NullSink, Statistics, StatisticsCollector};
 use crate::policy::CleanupPolicy;
 #[cfg(feature = "filesystem")]
@@ -38,9 +38,11 @@ pub enum SymlinkPolicy {
 /// must be representable as UTF-8 to survive a roundtrip) and timestamps
 /// are unix seconds/nanos. Deserialization tolerates missing fields that
 /// carry a default: `create_if_missing` (true), `cleanup_on_start` /
-/// `cleanup_on_shutdown` (false), `symlink_policy`, `recovery_policy` and
-/// `stale_instance_after` (one hour). `root` and `instance_id` have no
-/// default and are required. Unknown fields are ignored.
+/// `cleanup_on_shutdown` / `remove_instance_dir_on_shutdown` (false),
+/// `shutdown_wait_leases` (zero: do not wait), `symlink_policy`,
+/// `recovery_policy` and `stale_instance_after` (one hour). `root` and
+/// `instance_id` have no default and are required. Unknown fields are
+/// ignored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ManagerConfig {
@@ -72,6 +74,26 @@ pub struct ManagerConfig {
     /// How old a directory without a lock file must be before recovery treats it as stale.
     #[cfg_attr(feature = "serde", serde(default = "default_stale_instance_after"))]
     pub stale_instance_after: Duration,
+    /// Delete this instance's whole directory (`root/<instance>`) on shutdown.
+    ///
+    /// Off by default: shutting down never removes data the
+    /// application might still want. When enabled, the removal happens
+    /// after the shutdown sweep; the instance directory is only ever
+    /// deleted when it canonically resolves strictly inside the
+    /// canonicalized root — the root itself, a symlink to it, or a
+    /// directory that resolves outside it are refused with an error.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub remove_instance_dir_on_shutdown: bool,
+    /// How long [`TempManager::shutdown`] waits for active leases.
+    ///
+    /// Leases are how the library tracks operations that are still in
+    /// flight: an operation that holds a lease is by definition not
+    /// finished. Shutdown blocks until every lease is dropped or this
+    /// timeout elapses; the default is zero, meaning shutdown never
+    /// waits and every resource with held leases simply stays in
+    /// `PendingCleanup` for a later cleanup pass.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub shutdown_wait_leases: Duration,
 }
 
 #[cfg(feature = "serde")]
@@ -117,7 +139,7 @@ impl ManagerConfig {
 pub struct TempManager {
     config: ManagerConfig,
     registry: Arc<crate::core::registry::Registry>,
-    namespaces: Mutex<HashMap<String, Arc<Namespace>>>,
+    namespaces: Arc<Mutex<HashMap<String, Arc<Namespace>>>>,
     closed: Arc<AtomicBool>,
     counters: Arc<StatisticsCollector>,
     shared: Arc<NamespaceShared>,
@@ -128,11 +150,6 @@ impl TempManager {
     /// Start configuring a manager.
     pub fn builder() -> TempManagerBuilder {
         TempManagerBuilder::default()
-    }
-
-    #[cfg(feature = "filesystem")]
-    fn instance_dir(&self) -> PathBuf {
-        self.config.root.join(&self.config.instance_id)
     }
 
     /// Root directory this manager confines itself to.
@@ -185,36 +202,38 @@ impl TempManager {
 
     /// Get or create a namespace.
     ///
-    /// Namespace names must be non-empty, use `[A-Za-z0-9._-]`, and
-    /// contain no path separators. Creating a namespace after shutdown
-    /// fails.
+    /// `name` is either a single segment (`protocol`) or a `/`-joined
+    /// hierarchy (`protocol/tls`). Every segment must be non-empty, use
+    /// the namespace charset `[A-Za-z0-9._-]`, and contain no path
+    /// separators; nesting is limited to [`crate::namespace::MAX_NAMESPACE_DEPTH`]
+    /// levels. Intermediate levels are created (and registered with the
+    /// manager) automatically, so quotas, cleanup passes and statistics
+    /// see every level of the hierarchy.
+    ///
+    /// Creating the same namespace twice returns the same object.
+    /// Creating a namespace after shutdown fails with
+    /// [`crate::ConcurrencyError::ManagerClosed`].
+    ///
+    /// Isolation semantics: see the `namespace` module documentation —
+    /// per-resource access is exact-match (absolute isolation), while
+    /// quotas and namespace-scoped cleanup recurse over descendants.
     pub fn namespace(&self, name: &str) -> Result<Arc<Namespace>> {
-        validate_namespace_name(name)?;
+        validate_namespace_path(name)?;
         if self.is_closed() {
             return Err(ConcurrencyError::ManagerClosed.into());
         }
-        let mut namespaces = self
-            .namespaces
-            .lock()
-            .map_err(|_| ConcurrencyError::Poisoned)?;
-        if let Some(ns) = namespaces.get(name) {
-            return Ok(Arc::clone(ns));
+        // every level is materialized explicitly: the children must be
+        // in the map for quota reservations and recursive cleanup
+        let mut prefix = String::with_capacity(name.len());
+        let mut current = None;
+        for segment in name.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(segment);
+            current = Some(self.shared.get_or_create_namespace(&prefix)?);
         }
-        #[cfg(feature = "filesystem")]
-        {
-            let dir = self.instance_dir().join(name);
-            std::fs::create_dir_all(&dir)
-                .map_err(|source| ConfigError::RootCreate { path: dir, source })?;
-        }
-        let ns = Arc::new(Namespace::new(
-            name.to_owned(),
-            Arc::clone(&self.registry),
-            Arc::clone(&self.shared),
-        ));
-        namespaces.insert(name.to_owned(), Arc::clone(&ns));
-        #[cfg(feature = "tracing")]
-        tracing::debug!(namespace = %name, "namespace created");
-        Ok(ns)
+        Ok(current.expect("a validated namespace path has at least one segment"))
     }
 
     /// Names of all namespaces created so far.
@@ -315,10 +334,39 @@ impl TempManager {
 
     /// Shut the manager down.
     ///
-    /// Blocks new namespace creation, optionally sweeps expired
-    /// resources, and removes this instance's lock file. Safe to call
-    /// more than once: only the first call runs the sweep, later calls
-    /// (including concurrent ones) return without doing extra work.
+    /// The stages, in order — the first call runs them, later calls
+    /// (including concurrent ones) no-op calmly:
+    ///
+    /// 1. Block new namespace creation and resource creation: every
+    ///    operation gates on the manager's closed flag.
+    /// 2. **Wait for leases**, when configured: shutdown blocks until
+    ///    every lease is dropped or [`ManagerConfig::shutdown_wait_leases`]
+    ///    elapses (default: do not wait). Leases are how the library
+    ///    tracks operations that are still in flight; it does not —
+    ///    and deliberately cannot — know about arbitrary running code,
+    ///    only about the leases the application holds. An operation
+    ///    that wants to be seen by shutdown must hold a lease.
+    /// 3. Sweep expired resources when `cleanup_on_shutdown` is set.
+    ///    Lease-gated destruction defers resources with held leases
+    ///    into `PendingCleanup`; those stay registered and appear in
+    ///    the report as `deferred`. Nothing is force-destroyed late:
+    ///    what timed out in stage 2 stays pending for a later pass.
+    /// 4. Remove this instance's lock file.
+    /// 5. Remove this instance's whole directory (`root/<instance>`)
+    ///    when `remove_instance_dir_on_shutdown` is set — off by
+    ///    default. The removal is confined to the canonicalized root:
+    ///    the instance directory must canonically resolve strictly
+    ///    inside the root, or shutdown fails with an error instead of
+    ///    deleting anything.
+    ///
+    /// If the wait in stage 2 expires with leases still held, the
+    /// sweep still runs; resources whose destruction is lease-blocked
+    /// remain in `PendingCleanup` and are counted in the report's
+    /// `deferred` field — the report is the application's signal that
+    /// some operations were still in flight.
+    ///
+    /// Safe to call more than once: only the first call runs the full
+    /// sequence, later calls return an empty report.
     #[cfg_attr(feature = "tracing", tracing::instrument(
         skip(self),
         name = "shutdown",
@@ -326,13 +374,18 @@ impl TempManager {
         fields(instance = %self.config.instance_id),
     ))]
     pub fn shutdown(&self) -> Result<CleanupReport> {
-        // first caller does the sweep; everyone else no-ops calmly
+        // first caller does the work; everyone else no-ops calmly
         let already_closed = self.closed.swap(true, Ordering::SeqCst);
         #[cfg(feature = "tracing")]
         tracing::info!(
             cleanup_on_shutdown = self.config.cleanup_on_shutdown,
+            wait_leases_ms = self.config.shutdown_wait_leases.as_millis() as u64,
+            remove_instance_dir = self.config.remove_instance_dir_on_shutdown,
             "manager shutting down"
         );
+        if !already_closed && self.config.shutdown_wait_leases > Duration::ZERO {
+            wait_for_leases(&self.shared.leases, self.config.shutdown_wait_leases);
+        }
         let report = if self.config.cleanup_on_shutdown && !already_closed {
             self.cleanup_expired()?
         } else {
@@ -343,6 +396,9 @@ impl TempManager {
             let recovery = RecoveryManager::new(&self.config.root);
             // lock file removal is best-effort: a crash must not fail shutdown
             let _ = recovery.remove_lock(&self.config.instance_id);
+            if self.config.remove_instance_dir_on_shutdown && !already_closed {
+                remove_instance_dir(&self.config.root, &self.config.instance_id)?;
+            }
         }
         #[cfg(feature = "tracing")]
         tracing::info!(
@@ -365,6 +421,70 @@ impl core::fmt::Debug for TempManager {
     }
 }
 
+/// Wait until no leases are held or the timeout elapses.
+///
+/// Polls in short bursts; a poisoned book must not hang shutdown
+/// forever, so a failure to read the total is treated as "done".
+fn wait_for_leases(book: &crate::ownership::LeaseBook, timeout: Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        match book.total_leases() {
+            Ok(0) => return,
+            Ok(_) => {
+                let remaining = timeout.saturating_sub(start.elapsed());
+                if remaining.is_zero() {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        timeout_ms = timeout.as_millis() as u64,
+                        "shutdown timed out waiting for active leases"
+                    );
+                    return;
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(2)));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+/// Delete `root/<instance_id>` after verifying it canonically resolves
+/// strictly inside the canonicalized `root`.
+///
+/// Returns `Ok(())` when the directory does not exist. A symlink planted
+/// at the instance path, the root itself resolving out, or any path
+/// whose canonical form lies at or above the root is refused with an
+/// error — shutdown must never be able to delete data outside the root.
+#[cfg(feature = "filesystem")]
+fn remove_instance_dir(root: &Path, instance_id: &str) -> Result<()> {
+    let target = root.join(instance_id);
+    let canon = match std::fs::canonicalize(&target) {
+        Ok(canon) => canon,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            // nothing to remove; the instance directory is optional
+            return Ok(());
+        }
+        Err(source) => {
+            return Err(crate::core::error::BackendError::Io {
+                backend: "filesystem".to_string(),
+                source,
+            }
+            .into());
+        }
+    };
+    if canon == root || !canon.starts_with(root) {
+        return Err(crate::core::error::AccessError::OutsideRoot {
+            path: canon,
+            root: root.to_path_buf(),
+        }
+        .into());
+    }
+    std::fs::remove_dir_all(&canon).map_err(|source| crate::core::error::BackendError::Io {
+        backend: "filesystem".to_string(),
+        source,
+    })?;
+    Ok(())
+}
+
 /// Builder for [`TempManager`]. Finish with [`TempManagerBuilder::build`].
 pub struct TempManagerBuilder {
     root: Option<PathBuf>,
@@ -381,6 +501,8 @@ pub struct TempManagerBuilder {
     event_sink: Arc<dyn EventSink>,
     cleanup_policy: Option<CleanupPolicy>,
     custom_cleanup_policy: Option<Arc<dyn crate::policy::CustomCleanupPolicy>>,
+    remove_instance_dir_on_shutdown: bool,
+    shutdown_wait_leases: Duration,
 }
 
 impl Default for TempManagerBuilder {
@@ -400,6 +522,8 @@ impl Default for TempManagerBuilder {
             event_sink: Arc::new(NullSink),
             cleanup_policy: None,
             custom_cleanup_policy: None,
+            remove_instance_dir_on_shutdown: false,
+            shutdown_wait_leases: Duration::ZERO,
         }
     }
 }
@@ -426,6 +550,36 @@ impl TempManagerBuilder {
     /// Sweep expired resources during [`TempManager::shutdown`].
     pub fn cleanup_on_shutdown(mut self, cleanup: bool) -> Self {
         self.cleanup_on_shutdown = cleanup;
+        self
+    }
+
+    /// Delete this instance's whole directory (`root/<instance>`) on
+    /// shutdown. Default: false.
+    ///
+    /// The removal happens after the shutdown sweep. It is confined:
+    /// the instance directory must canonically resolve strictly inside
+    /// the (canonicalized) root. A symlink planted at that path, the
+    /// root itself, or anything resolving at or above it fails the
+    /// removal with an error instead of deleting data.
+    pub fn remove_instance_dir_on_shutdown(mut self, remove: bool) -> Self {
+        self.remove_instance_dir_on_shutdown = remove;
+        self
+    }
+
+    /// How long [`TempManager::shutdown`] waits for active leases.
+    /// Default: zero — shutdown never waits.
+    ///
+    /// Leases are the library's mechanism for tracking operations
+    /// that are still in flight: an operation that holds a lease is,
+    /// by definition, not finished. When the timeout is set, shutdown
+    /// blocks until every lease is dropped or the timeout elapses;
+    /// whatever still holds a lease at that point stays in
+    /// `PendingCleanup` and shows up in the shutdown report's
+    /// `deferred` count. The library cannot see arbitrary running
+    /// code — if an operation should be seen by shutdown, it must
+    /// hold a lease (see `resource.acquire()`).
+    pub fn shutdown_wait_leases(mut self, timeout: Duration) -> Self {
+        self.shutdown_wait_leases = timeout;
         self
     }
 
@@ -538,6 +692,8 @@ impl TempManagerBuilder {
             instance_id,
             recovery_policy: self.recovery_policy,
             stale_instance_after: self.stale_instance_after,
+            remove_instance_dir_on_shutdown: self.remove_instance_dir_on_shutdown,
+            shutdown_wait_leases: self.shutdown_wait_leases,
         };
         config.validate()?;
 
@@ -624,6 +780,7 @@ impl TempManagerBuilder {
         let counters = Arc::new(StatisticsCollector::new());
         let closed = Arc::new(AtomicBool::new(false));
         let leases = crate::ownership::LeaseBook::with_counters(Arc::clone(&counters));
+        let namespaces = Arc::new(Mutex::new(HashMap::new()));
         let shared = Arc::new(NamespaceShared {
             config: Arc::new(config.clone()),
             registry: Arc::clone(&registry),
@@ -631,7 +788,7 @@ impl TempManagerBuilder {
             counters: Arc::clone(&counters),
             leases,
             sink: self.event_sink,
-            create_lock: Mutex::new(()),
+            namespaces: Arc::downgrade(&namespaces),
             closed: Arc::clone(&closed),
             cleanup_policy: std::sync::RwLock::new(self.cleanup_policy),
             custom_cleanup_policy: std::sync::RwLock::new(self.custom_cleanup_policy),
@@ -645,7 +802,7 @@ impl TempManagerBuilder {
         Ok(TempManager {
             config,
             registry,
-            namespaces: Mutex::new(HashMap::new()),
+            namespaces,
             closed,
             counters,
             shared,
@@ -693,7 +850,9 @@ mod tests {
         let again = manager.namespace("protocol").unwrap();
         assert!(Arc::ptr_eq(&ns, &again));
         assert_eq!(manager.namespaces().unwrap(), vec!["protocol".to_string()]);
-        assert!(manager.namespace("bad/name").is_err());
+        assert!(manager.namespace("bad\\name").is_err());
+        assert!(manager.namespace("../escape").is_err());
+        assert!(manager.namespace("a//b").is_err());
         manager.shutdown().unwrap();
         assert!(manager.namespace("after").is_err());
     }

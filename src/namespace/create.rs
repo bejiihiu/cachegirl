@@ -1,22 +1,23 @@
 //! Resource creation for namespaces.
 //!
 //! Every create path goes through the same steps: check the manager
-//! is open, validate the name, take the manager-wide creation lock,
-//! enforce manager and namespace quotas, materialize the resource via
-//! the right backend, register it, tag it with owner/TTL/metadata and
-//! emit an observability event. Creation is serialized because quota
-//! checks are only atomic when they happen under this lock.
+//! is open, validate the name, reserve a slot in the registry (which
+//! checks the manager and all ancestor quotas atomically), materialize
+//! the resource via the right backend, publish the reservation, tag it
+//! with owner/TTL/metadata and emit an observability event. No global
+//! creation mutex: namespaces that share nothing can create in
+//! parallel, and namespaces that share quota still cannot overshoot.
 
 use core::time::Duration;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use crate::backend::ResourceRequest;
-#[cfg(any(feature = "memory", feature = "cache"))]
 use crate::core::error::ConfigError;
 use crate::core::error::{BackendError, ConcurrencyError, QuotaError, RegistryError, Result};
+use crate::core::lifecycle::ResourceState;
 use crate::core::resource::{ResourceId, ResourceKind, ResourceMeta};
-use crate::namespace::{Namespace, validate_resource_name};
+use crate::namespace::{Namespace, Reservation, ReserveFailure, validate_resource_name};
 use crate::observability::Event;
 use crate::observability::metrics_support;
 
@@ -104,19 +105,16 @@ impl CreateOptions {
     }
 }
 
+/// Caller hook run after the backend materializes a resource but before
+/// it becomes visible: the cache store's duplicate-key verdict lives here.
+pub(crate) type PrePublish<'a> = Option<&'a mut dyn FnMut(&ResourceMeta) -> Result<()>>;
+
 impl Namespace {
     fn check_open(&self) -> Result<()> {
         if self.shared().closed.load(Ordering::SeqCst) {
             return Err(ConcurrencyError::ManagerClosed.into());
         }
         Ok(())
-    }
-
-    fn lock_create(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
-        self.shared()
-            .create_lock
-            .lock()
-            .map_err(|_| ConcurrencyError::Poisoned.into())
     }
 
     /// Mint the ownership core for a freshly created resource.
@@ -144,38 +142,60 @@ impl Namespace {
         tracing::warn!(scope, reason, error = %error, "quota rejected resource creation");
     }
 
-    /// Enforce manager-wide and namespace quotas for `added_bytes`.
+    /// Build the quota specification for a new reservation.
     ///
-    /// Called with the creation lock held; the count check projects one
-    /// additional resource on top of current usage.
-    fn check_quotas(&self, added_bytes: u64) -> Result<()> {
+    /// The specification names the manager-wide limit plus this
+    /// namespace and every ancestor — each enforced against its own
+    /// subtree totals. Enforcement happens inside
+    /// [`crate::core::registry::Registry::reserve`], atomically, under
+    /// the registry lock.
+    fn reservation_spec(&self) -> Result<crate::core::registry::QuotaReservation> {
         let shared = self.shared();
-        let snapshot = shared.registry.snapshot()?;
-        let manager_bytes: u64 =
-            crate::core::saturating_bytes(snapshot.iter().map(|m| m.size_bytes));
-        let manager_count = snapshot.len() as u64;
-
-        let manager_quota = crate::namespace::NamespaceQuota {
+        let manager = crate::namespace::NamespaceQuota {
             max_bytes: shared.config.max_size,
             max_resources: shared.config.max_resources,
         };
-        if let Err(source) =
-            manager_quota.check("manager", manager_bytes, manager_count, added_bytes)
-        {
-            Self::quota_rejected("manager", &source);
-            return Err(source.into());
+        let depth = self.name.split('/').count();
+        let mut scopes = Vec::with_capacity(depth);
+        let mut prefix = String::new();
+        for segment in self.name.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(segment);
+            if prefix == self.name {
+                scopes.push((prefix.clone(), self.quota()));
+                break;
+            }
+            let quota = self.find_namespace_quota(&prefix)?;
+            scopes.push((prefix.clone(), quota));
         }
-
-        let (ns_bytes, ns_count) = self.usage()?;
-        let ns_quota = self.quota();
-        if let Err(source) = ns_quota.check(&self.name, ns_bytes, ns_count, added_bytes) {
-            Self::quota_rejected(&self.name, &source);
-            return Err(source.into());
-        }
-        Ok(())
+        Ok(crate::core::registry::QuotaReservation { manager, scopes })
     }
 
-    /// Materialize via backend, register, tag, emit. Caller owns the lock.
+    /// Read the quota of another namespace in this manager by full path.
+    ///
+    /// Used to enforce ancestor quotas at creation time. Fails closed:
+    /// if the ancestor cannot be resolved, creation is refused with
+    /// [`ConcurrencyError::ManagerClosed`] rather than slipping past a
+    /// quota nobody could check.
+    fn find_namespace_quota(&self, full: &str) -> Result<crate::namespace::NamespaceQuota> {
+        let map = self
+            .shared()
+            .namespaces
+            .upgrade()
+            .ok_or(ConcurrencyError::ManagerClosed)?;
+        let guard = map.lock().map_err(|_| ConcurrencyError::Poisoned)?;
+        guard.get(full).map(|ns| ns.quota()).ok_or_else(|| {
+            ConfigError::Invalid(format!("parent namespace `{full}` is not registered")).into()
+        })
+    }
+
+    /// Materialize via backend, reserve, publish.
+    ///
+    /// Returns the published meta on success; on any failure everything
+    /// is rolled back (the physical side is released and the reservation
+    /// refunded by its guard).
     fn create_prepared(
         &self,
         name: &str,
@@ -183,6 +203,7 @@ impl Namespace {
         size_hint: Option<u64>,
         backend_name: Option<&str>,
         options: CreateOptions,
+        pre_publish: PrePublish<'_>,
     ) -> Result<ResourceMeta> {
         if options.ttl.is_some() && options.idle_ttl.is_some() {
             return Err(crate::core::error::ConfigError::Invalid(
@@ -225,15 +246,45 @@ impl Namespace {
             request.metadata.insert(k.clone(), v.clone());
         }
 
+        // reservation first: the quota check and the placeholder insert
+        // happen atomically inside the registry, the backend call happens
+        // outside any registry critical section
+        let placeholder = {
+            let mut m = ResourceMeta::new(name, &self.name, kind);
+            m.state = ResourceState::Uninitialized;
+            m.size_bytes = size_hint.unwrap_or(0);
+            m
+        };
+        let spec = self.reservation_spec()?;
+        let reservation = match Reservation::reserve(
+            std::sync::Arc::clone(shared),
+            placeholder,
+            spec,
+        ) {
+            Ok(reservation) => reservation,
+            Err(ReserveFailure::Quota { scope, source }) => {
+                Self::quota_rejected(&scope, &source);
+                return Err(source.into());
+            }
+            Err(ReserveFailure::Registry(source)) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(namespace = %self.name, kind = %kind, error = %source, "registry failed to accept the reservation; creation rolled back");
+                return Err(source.into());
+            }
+        };
+
         let mut meta = match backend.create(&request) {
             Ok(meta) => meta,
             Err(source) => {
                 metrics_support::resource_created(&self.name, kind, metrics_support::RESULT_ERROR);
                 #[cfg(feature = "tracing")]
                 tracing::warn!(namespace = %self.name, kind = %kind, error = %source, "backend failed to create resource");
+                // reservation drops here and refunds the slot
                 return Err(source);
             }
         };
+        // the reservation owns the identity; the backend's own id is discarded
+        meta.id = reservation.id().clone();
         meta.ttl = options
             .idle_ttl
             .map(crate::policy::Ttl::Idle)
@@ -250,14 +301,27 @@ impl Namespace {
         meta.metadata
             .insert("backend".into(), backend.name().to_owned());
 
-        if let Err(source) = shared.registry.register(meta.clone()) {
-            // roll the physical side back so failed creations never leak
+        // caller hook: e.g. the cache store's duplicate-key verdict
+        // must land before the resource becomes visible
+        if let Some(pre_publish) = pre_publish {
+            if let Err(source) = pre_publish(&meta) {
+                // undo the physical side; reservation drop refunds the slot
+                let _ = backend.release(&meta);
+                metrics_support::resource_created(&self.name, kind, metrics_support::RESULT_ERROR);
+                #[cfg(feature = "tracing")]
+                tracing::warn!(namespace = %self.name, kind = %kind, error = %source, "post-create check failed; creation rolled back");
+                return Err(source);
+            }
+        }
+
+        if let Err(source) = reservation.publish(&meta) {
             let _ = backend.release(&meta);
             metrics_support::resource_created(&self.name, kind, metrics_support::RESULT_ERROR);
             #[cfg(feature = "tracing")]
-            tracing::error!(namespace = %self.name, kind = %kind, id = %meta.id, error = %source, "registry failed to record the resource; creation rolled back");
-            return Err(source.into());
-        }
+            tracing::error!(namespace = %self.name, kind = %kind, id = %meta.id, error = %source, "registry failed to publish the resource; creation rolled back");
+            // reservation drops here: the placeholder is refunded
+            return Err(source);
+        };
         metrics_support::resource_created(&self.name, kind, metrics_support::RESULT_OK);
         metrics_support::active_resources_change(1.0);
         #[cfg(feature = "tracing")]
@@ -287,10 +351,7 @@ impl Namespace {
     ) -> Result<ResourceMeta> {
         self.check_open()?;
         validate_resource_name(name)?;
-        let _guard = self.lock_create()?;
-        self.check_open()?; // shutdown may land between the check and the lock
-        self.check_quotas(size_hint.unwrap_or(0))?;
-        self.create_prepared(name, kind, size_hint, backend_name, options)
+        self.create_prepared(name, kind, size_hint, backend_name, options, None)
     }
 
     // -- filesystem resources ---------------------------------------------
@@ -439,34 +500,44 @@ impl Namespace {
     ) -> Result<crate::resource::CacheEntryResource> {
         self.check_open()?;
         validate_resource_name(key)?;
-        let _guard = self.lock_create()?;
-        self.check_open()?;
         let size = u64::try_from(value.len())
             .map_err(|_| ConfigError::Invalid("payload does not fit into u64".into()))?;
-        self.check_quotas(size)?;
         let shared = self.shared();
-        if shared.backends.cache_store.contains(&self.name, key) {
-            return Err(BackendError::Rejected {
-                backend: "cache".to_string(),
-                reason: format!(
-                    "cache key `{key}` already exists in namespace `{}`",
-                    self.name
-                ),
-            }
-            .into());
-        }
-        let mut options = options;
-        options.metadata.insert("cache_key".into(), key.to_owned());
-        let meta = self.create_prepared(key, ResourceKind::Cache, Some(size), None, options)?;
         let entry = std::sync::Arc::new(std::sync::Mutex::new(crate::resource::CacheEntry::new(
             key, value,
         )));
-        shared.backends.cache_store.insert(
-            &self.name,
+        // the duplicate-key verdict must land inside the creation path:
+        // the store decides atomically before the resource goes live,
+        // so two creators of the same key can never both win
+        let entry_for_check = std::sync::Arc::clone(&entry);
+        let store = std::sync::Arc::clone(&shared.backends.cache_store);
+        let namespace = self.name.clone();
+        let mut pre_publish = move |meta: &ResourceMeta| -> Result<()> {
+            if store.insert_if_absent(
+                &namespace,
+                key,
+                meta.id.clone(),
+                std::sync::Arc::clone(&entry_for_check),
+            ) {
+                Ok(())
+            } else {
+                Err(BackendError::Rejected {
+                    backend: "cache".to_string(),
+                    reason: format!("cache key `{key}` already exists in namespace `{namespace}`"),
+                }
+                .into())
+            }
+        };
+        let mut options = options;
+        options.metadata.insert("cache_key".into(), key.to_owned());
+        let meta = self.create_prepared(
             key,
-            meta.id.clone(),
-            std::sync::Arc::clone(&entry),
-        );
+            ResourceKind::Cache,
+            Some(size),
+            None,
+            options,
+            Some(&mut pre_publish),
+        )?;
         let core = self.ownership_core(&meta.id, meta.ownership);
         Ok(crate::resource::CacheEntryResource::new(
             meta.id,

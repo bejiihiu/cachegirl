@@ -120,18 +120,39 @@ fn traversal_names_are_rejected_everywhere() {
 
 #[test]
 fn traversal_via_backend_namespace_parameter_is_rejected() {
-    // the namespace field of a request is a path component too; it
-    // must not be able to escape the instance dir either
+    // the namespace field of a request is a path too; no segment may
+    // escape the instance dir. A legal nested path (`a/b`) is accepted
+    // and materializes under root/<instance>/a/b/ confined, by design.
     let root = TestDir::new("sec-ns-escape");
     let be = backend(root.path());
 
-    for namespace in ["ns/../other", "ns\\..\\other", "..", ".", "a/b"] {
+    for namespace in [
+        "ns/../other",
+        "ns\\..\\other",
+        "..",
+        ".",
+        "a//b",
+        "/a",
+        "a/",
+        "a\\b",
+    ] {
         let request = ResourceRequest::new("ok-name", namespace, ResourceKind::File);
         assert!(
             be.create(&request).is_err(),
             "backend must reject namespace {namespace:?}"
         );
     }
+
+    // a legal nested path creates the whole subtree, confined
+    let request = ResourceRequest::new("ok-name", "a/b", ResourceKind::File);
+    let meta = be.create(&request).expect("nested namespace is legal");
+    let path = std::path::PathBuf::from(meta.metadata.get("path").unwrap());
+    assert!(path.starts_with(be.root()));
+    let rel = path.strip_prefix(be.root()).unwrap();
+    assert!(
+        rel.ends_with("a/b/ok-name".replace('/', std::path::MAIN_SEPARATOR_STR)),
+        "nested file must land in the subtree: {rel:?}"
+    );
 }
 
 #[test]

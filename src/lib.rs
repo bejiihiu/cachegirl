@@ -52,7 +52,8 @@
 //! - Fields that were added after the first release default when
 //!   absent (`ttl`, `priority`, `cleanup_attempts`, `metadata`,
 //!   `deferred`, `reasons`, `failure_reasons`, `entries`, `bytes_freed`,
-//!   `skipped`, ...); `Option` fields are always optional.
+//!   `skipped`, `remove_instance_dir_on_shutdown`, `shutdown_wait_leases`,
+//!   ...); `Option` fields are always optional.
 //! - Unknown fields are ignored, never rejected, so newer writers and
 //!   older readers can coexist.
 //! - `PathBuf` serializes as a string; non-UTF-8 paths cannot cross the

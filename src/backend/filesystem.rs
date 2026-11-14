@@ -99,10 +99,19 @@ impl FilesystemBackend {
     }
 
     /// Resolve `relative` against the instance namespace dir, keeping it inside the root.
+    ///
+    /// The namespace may be a path (`parent/sub`); every segment is
+    /// validated individually, so nested namespaces materialize under
+    /// `root/<instance>/parent/sub/` and no segment can traverse out.
     fn resolve(&self, namespace: &str, name: &str) -> Result<PathBuf> {
-        validate_segment(namespace)?;
         validate_segment(name)?;
-        let candidate = self.root.join(&self.instance_id).join(namespace).join(name);
+        let mut candidate = self.root.join(&self.instance_id);
+        for segment in crate::namespace::validate_namespace_path(namespace)
+            .map_err(|_| AccessError::UnsafeName(namespace.to_owned()))?
+        {
+            candidate.push(segment);
+        }
+        candidate.push(name);
         let normalized = normalize_lexically(&candidate)?;
         if !normalized.starts_with(&self.root) {
             return Err(AccessError::OutsideRoot {
