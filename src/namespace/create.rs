@@ -21,7 +21,12 @@ use crate::observability::Event;
 use crate::observability::metrics_support;
 
 /// Free-form options applied at resource creation time.
-#[derive(Clone, Debug, Default)]
+///
+/// `ownership` defaults to [`crate::Ownership::Managed`] and `metadata`
+/// to empty when absent. Duration fields serialize as
+/// `{"secs": ..., "nanos": ...}`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CreateOptions {
     /// Owner tag, e.g. the component or request id responsible.
     pub owner: Option<String>,
@@ -34,6 +39,7 @@ pub struct CreateOptions {
     /// Defaults to [`crate::Ownership::Managed`]: the resource lives
     /// until it is released or reclaimed by a cleanup pass. See
     /// [`crate::Ownership`] for the full semantics of every mode.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub ownership: crate::core::resource::Ownership,
     /// Eviction priority relative to other resources.
     ///
@@ -42,6 +48,7 @@ pub struct CreateOptions {
     /// one), falling back to [`crate::Priority::Normal`].
     pub priority: Option<crate::policy::Priority>,
     /// Free-form metadata attached to the registry record.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub metadata: HashMap<String, String>,
 }
 

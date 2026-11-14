@@ -61,7 +61,7 @@ pub enum RecoveryAction {
 }
 
 /// One decision the recovery pass made, with the reason behind it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoveryEntry {
     /// Instance directory name (not a full path).
@@ -75,7 +75,11 @@ pub struct RecoveryEntry {
 }
 
 /// Outcome of a recovery pass.
-#[derive(Clone, Debug, Default)]
+///
+/// `skipped`, `bytes_freed`, `entries` and `failure_reasons` default
+/// when absent so reports written by older versions still load.
+/// Unknown fields are ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoveryReport {
     /// Instance directories examined.
@@ -86,14 +90,18 @@ pub struct RecoveryReport {
     pub kept: u64,
     /// Directories reported but not removed: unverifiable ownership, or
     /// [`RecoveryPolicy::ReportOnly`]. See [`RecoveryReport::entries`].
+    #[cfg_attr(feature = "serde", serde(default))]
     pub skipped: u64,
     /// Directories that failed to be reclaimed.
     pub failed: u64,
     /// Bytes freed by reclaiming stale directories.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub bytes_freed: u64,
     /// Every decision, in scan order.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub entries: Vec<RecoveryEntry>,
     /// Human-readable reasons for the failures.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub failure_reasons: Vec<String>,
 }
 

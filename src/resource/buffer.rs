@@ -10,7 +10,12 @@ use crate::core::resource::ResourceId;
 use crate::ownership::{Lease, OwnershipCore};
 
 /// An owned, reusable byte buffer.
+///
+/// Serializes transparently as its bytes (a JSON array of numbers);
+/// `new`/`with_capacity` semantics are not preserved, only the contents.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct Buffer {
     data: Vec<u8>,
 }

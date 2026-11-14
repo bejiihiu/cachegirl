@@ -8,7 +8,11 @@ use crate::core::resource::ResourceId;
 use crate::ownership::{Lease, OwnershipCore};
 
 /// One cached value with its access bookkeeping.
-#[derive(Clone, Debug)]
+///
+/// `created_at` and `last_accessed` serialize as
+/// `{"secs_since_epoch": ..., "nanos_since_epoch": ...}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CacheEntry {
     /// Lookup key.
     pub key: String,

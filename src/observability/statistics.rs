@@ -6,7 +6,10 @@ use std::time::SystemTime;
 use crate::core::registry::Registry;
 
 /// Plain serializable snapshot of manager statistics.
-#[derive(Clone, Debug, Default)]
+///
+/// `captured_at` serializes as `{"secs_since_epoch": ..., "nanos_since_epoch": ...}`
+/// and may be `null`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Statistics {
     /// Instance the snapshot describes.

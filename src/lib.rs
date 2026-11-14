@@ -28,6 +28,36 @@
 //! - **Optional integrations.** Filesystem, memory, cache, async,
 //!   `serde`, `metrics`, `tracing`, and Tokio support are feature-gated.
 //!
+//! ## Serialization (`serde` feature)
+//!
+//! The `serde` feature derives `Serialize`/`Deserialize` for the crate's
+//! data-shaped public types: resource metadata, manager and namespace
+//! quotas, create options, cleanup policies and reports, recovery
+//! policies and reports, statistics snapshots, events and the resource
+//! request backends see. Types that carry live state (handles, the
+//! manager, registries, lease/lock books, sinks, backends) and the
+//! error enums (which wrap `std::io::Error`) are deliberately not
+//! serializable — persist [`Statistics`], [`ResourceMeta`] records or
+//! reports instead.
+//!
+//! Format conventions, chosen so older files keep loading:
+//!
+//! - Enums are externally tagged (serde's default), e.g.
+//!   `{"Fixed": {"secs": 60, "nanos": 0}}` for [`Ttl::Fixed`], or
+//!   `{"Namespace": "net"}` for [`CleanupScope::Namespace`].
+//! - Timestamps serialize as `{"secs_since_epoch": ...,
+//!   "nanos_since_epoch": ...}`; durations as `{"secs": ..., "nanos": ...}`.
+//!   Nanosecond precision is the ceiling; the OS clock granularity applies
+//!   (100 ns on Windows). Pre-1970 timestamps are rejected at serialize time.
+//! - Fields that were added after the first release default when
+//!   absent (`ttl`, `priority`, `cleanup_attempts`, `metadata`,
+//!   `deferred`, `reasons`, `failure_reasons`, `entries`, `bytes_freed`,
+//!   `skipped`, ...); `Option` fields are always optional.
+//! - Unknown fields are ignored, never rejected, so newer writers and
+//!   older readers can coexist.
+//! - `PathBuf` serializes as a string; non-UTF-8 paths cannot cross the
+//!   roundtrip.
+//!
 //! ## Example
 //!
 //! ```rust

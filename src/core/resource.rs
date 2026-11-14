@@ -178,7 +178,13 @@ impl fmt::Display for ResourceKind {
 }
 
 /// Bookkeeping record for a single managed resource.
-#[derive(Clone, Debug)]
+///
+/// `created_at` and `last_accessed` serialize as
+/// `{"secs_since_epoch": ..., "nanos_since_epoch": ...}`. `ttl`,
+/// `priority`, `cleanup_attempts` and `metadata` default when absent so
+/// records written by older versions still load. Unknown fields are
+/// ignored.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ResourceMeta {
     /// Unique id assigned at registration time.
@@ -214,6 +220,7 @@ pub struct ResourceMeta {
     #[cfg_attr(feature = "serde", serde(default))]
     pub cleanup_attempts: u32,
     /// Free-form user metadata.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub metadata: HashMap<String, String>,
 }
 

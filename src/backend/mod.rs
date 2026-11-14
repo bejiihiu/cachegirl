@@ -23,7 +23,11 @@ use crate::core::error::Result;
 use crate::core::resource::{ResourceKind, ResourceMeta};
 
 /// Everything a backend needs to know to create a resource.
-#[derive(Clone, Debug)]
+///
+/// Backends that persist request bookkeeping can roundtrip this
+/// through `serde`; `size_hint` and `metadata` default when absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ResourceRequest {
     /// Human-friendly resource name.
     pub name: String,
@@ -32,8 +36,10 @@ pub struct ResourceRequest {
     /// Category of resource.
     pub kind: ResourceKind,
     /// Expected size in bytes, if known. Backends may enforce it.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub size_hint: Option<u64>,
     /// Free-form user metadata.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub metadata: HashMap<String, String>,
 }
 

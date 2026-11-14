@@ -70,7 +70,11 @@ impl RemovalReasons {
 /// and the pass continues with the rest. `reasons` breaks `removed`
 /// and `deferred` down by cause so callers can tell *why* the pass
 /// did what it did.
-#[derive(Clone, Debug, Default)]
+///
+/// `duration` serializes as `{"secs": ..., "nanos": ...}`. `deferred`,
+/// `failure_reasons` and `reasons` default when absent so reports
+/// written by older versions still load. Unknown fields are ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CleanupReport {
     /// Resources examined.
@@ -82,12 +86,14 @@ pub struct CleanupReport {
     /// Resources that were tried but could not be reclaimed.
     pub failed: u64,
     /// Resources held back because leases were still active.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub deferred: u64,
     /// Total bytes reclaimed.
     pub bytes_freed: u64,
     /// Wall-clock time the pass took.
     pub duration: Duration,
     /// Why individual failures happened.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub failure_reasons: Vec<String>,
     /// Per-cause accounting of removals and deferrals.
     #[cfg_attr(feature = "serde", serde(default))]

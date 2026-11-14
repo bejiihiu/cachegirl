@@ -11,6 +11,9 @@ use std::time::SystemTime;
 use crate::core::resource::ResourceMeta;
 
 /// What a cleanup pass was scoped to.
+///
+/// Serializes as externally tagged, e.g. `"Manager"` or
+/// `{"Namespace": "name"}`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CleanupScope {
@@ -21,7 +24,10 @@ pub enum CleanupScope {
 }
 
 /// Read-only context handed to a custom policy for each decision.
-#[derive(Clone, Debug)]
+///
+/// `now` serializes as `{"secs_since_epoch": ..., "nanos_since_epoch": ...}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CleanupContext {
     /// One `now` for the whole pass, so decisions stay consistent
     /// within a single sweep.

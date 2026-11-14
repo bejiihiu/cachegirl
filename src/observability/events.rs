@@ -8,7 +8,10 @@ use std::sync::Mutex;
 use crate::core::resource::{ResourceId, ResourceKind};
 
 /// Something notable that happened inside the manager.
-#[derive(Clone, Debug)]
+///
+/// Enums serialize externally tagged, e.g.
+/// `{"ResourceCreated": {"instance": ..., "id": ..., ...}}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Event {
     /// A resource was registered.

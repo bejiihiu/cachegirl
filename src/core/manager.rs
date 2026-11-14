@@ -33,15 +33,27 @@ pub enum SymlinkPolicy {
 }
 
 /// Validated manager configuration. Build one via [`TempManager::builder`].
-#[derive(Clone, Debug)]
+///
+/// Serializes as a flat object; `PathBuf` fields become strings (so paths
+/// must be representable as UTF-8 to survive a roundtrip) and timestamps
+/// are unix seconds/nanos. Deserialization tolerates missing fields that
+/// carry a default: `create_if_missing` (true), `cleanup_on_start` /
+/// `cleanup_on_shutdown` (false), `symlink_policy`, `recovery_policy` and
+/// `stale_instance_after` (one hour). `root` and `instance_id` have no
+/// default and are required. Unknown fields are ignored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ManagerConfig {
     /// Root directory all file resources live under.
     pub root: PathBuf,
     /// Create the root directory if it does not exist.
+    #[cfg_attr(feature = "serde", serde(default = "default_create_if_missing"))]
     pub create_if_missing: bool,
     /// Reclaim stale instance data when the manager is built.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub cleanup_on_start: bool,
     /// Sweep expired resources when the manager is shut down.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub cleanup_on_shutdown: bool,
     /// Manager-wide quota in bytes.
     pub max_size: Option<u64>,
@@ -50,13 +62,26 @@ pub struct ManagerConfig {
     /// Default TTL applied to resources unless overridden.
     pub default_ttl: Option<Duration>,
     /// Symlink handling for file operations.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub symlink_policy: SymlinkPolicy,
     /// Instance id for this manager.
     pub instance_id: String,
     /// How crash recovery behaves on startup.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub recovery_policy: RecoveryPolicy,
     /// How old a directory without a lock file must be before recovery treats it as stale.
+    #[cfg_attr(feature = "serde", serde(default = "default_stale_instance_after"))]
     pub stale_instance_after: Duration,
+}
+
+#[cfg(feature = "serde")]
+fn default_create_if_missing() -> bool {
+    true
+}
+
+#[cfg(feature = "serde")]
+fn default_stale_instance_after() -> Duration {
+    crate::recovery::DEFAULT_STALE_INSTANCE_AFTER
 }
 
 impl ManagerConfig {
