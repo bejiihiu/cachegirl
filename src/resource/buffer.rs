@@ -3,7 +3,11 @@
 //! Wraps `Vec<u8>` and keeps the allocation between uses so hot paths
 //! can recycle buffers instead of churning the allocator.
 
+use std::sync::Arc;
+
+use crate::core::error::ConcurrencyError;
 use crate::core::resource::ResourceId;
+use crate::ownership::{Lease, OwnershipCore};
 
 /// An owned, reusable byte buffer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -73,24 +77,35 @@ impl AsRef<[u8]> for Buffer {
 
 /// A buffer registered in the registry.
 ///
-/// Holds the actual allocation; dropping it frees the memory. The
-/// registry entry follows the namespace's cleanup rules, not the
-/// handle's destructor.
+/// Holds the actual allocation. What happens on drop depends on the
+/// ownership mode the buffer was created with: `Managed` and `Leased`
+/// handles detach without touching the accounting, `Owned` and
+/// `Shared` handles release it. Destruction always stands down while
+/// leases are held.
 #[derive(Clone, Debug)]
 pub struct BufferResource {
     id: ResourceId,
     buffer: Buffer,
+    core: Arc<OwnershipCore>,
 }
 
 impl BufferResource {
-    /// Wrap a buffer with its resource id.
-    pub fn new(id: ResourceId, buffer: Buffer) -> Self {
-        Self { id, buffer }
+    pub(crate) fn new(id: ResourceId, buffer: Buffer, core: Arc<OwnershipCore>) -> Self {
+        Self { id, buffer, core }
     }
 
     /// Resource id in the registry.
     pub fn id(&self) -> &ResourceId {
         &self.id
+    }
+
+    /// Acquire a lease on the resource.
+    ///
+    /// While at least one lease is held, the resource cannot be
+    /// physically released: explicit release and cleanup passes move it
+    /// to `PendingCleanup` instead. Dropping the lease releases it.
+    pub fn acquire(&self) -> Result<Lease, ConcurrencyError> {
+        self.core.acquire_lease()
     }
 
     /// Borrow the contents.
@@ -129,8 +144,11 @@ impl BufferResource {
     }
 
     /// Consume the handle and return the inner vec.
-    pub fn into_vec(self) -> Vec<u8> {
-        self.buffer.into_inner()
+    ///
+    /// Consuming the handle drops it; the ownership mode applies to it
+    /// like to any other drop.
+    pub fn into_vec(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buffer).into_inner()
     }
 }
 

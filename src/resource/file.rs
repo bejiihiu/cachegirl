@@ -1,35 +1,72 @@
 //! A file-backed resource handle.
 //!
-//! The handle does not delete the file on drop — deletion is a cleanup
-//! policy decision, not a destructor side effect. What it gives you is
-//! cheap access to the path and live size information.
+//! What happens on drop depends on the ownership mode the resource was
+//! created with: `Managed` and `Leased` handles detach without touching
+//! the file, `Owned` and `Shared` handles destroy it. Physical deletion
+//! always goes through the backend and always stands down while leases
+//! are held.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::core::error::ConcurrencyError;
 use crate::core::resource::ResourceId;
+use crate::ownership::{Lease, OwnershipCore};
 
 /// Lightweight handle to a registered file resource.
 #[derive(Clone, Debug)]
 pub struct FileResource {
     id: ResourceId,
     path: PathBuf,
+    core: Arc<OwnershipCore>,
 }
 
 impl FileResource {
-    /// Wrap a path with its resource id.
-    pub fn new(id: ResourceId, path: impl Into<PathBuf>) -> Self {
+    // internal: handles are minted by the manager, not assembled by hand
+    pub(crate) fn new(id: ResourceId, path: impl Into<PathBuf>, core: Arc<OwnershipCore>) -> Self {
         Self {
             id,
             path: path.into(),
+            core,
         }
     }
 
     /// Resource id in the registry.
     pub fn id(&self) -> &ResourceId {
         &self.id
+    }
+
+    /// Acquire a lease on the resource.
+    ///
+    /// While at least one lease is held, the resource cannot be
+    /// physically deleted: explicit release and cleanup passes move it
+    /// to `PendingCleanup` instead. Dropping the lease releases it.
+    ///
+    /// Fails with [`ConcurrencyError::Destroying`] if the resource is
+    /// being destroyed right now, or [`ConcurrencyError::Poisoned`] if
+    /// the internal book was poisoned by a panic.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use cachegirl::TempManager;
+    /// # let dir = std::env::temp_dir().join(format!("cachegirl-acquire-{}", std::process::id()));
+    /// # let manager = TempManager::builder().root(&dir).build()?;
+    /// # let ns = manager.namespace("protocol")?;
+    /// let file = ns.create_file("packet.bin")?;
+    /// let lease = file.acquire()?;
+    /// process(&file);
+    /// drop(lease);
+    /// # fn process(_: &cachegirl::FileResource) {}
+    /// # manager.shutdown()?;
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok::<(), cachegirl::Error>(())
+    /// ```
+    pub fn acquire(&self) -> Result<Lease, ConcurrencyError> {
+        self.core.acquire_lease()
     }
 
     /// Path on disk.
@@ -63,14 +100,16 @@ impl FileResource {
 pub struct DirectoryResource {
     id: ResourceId,
     path: PathBuf,
+    core: Arc<OwnershipCore>,
 }
 
 impl DirectoryResource {
-    /// Wrap a path with its resource id.
-    pub fn new(id: ResourceId, path: impl Into<PathBuf>) -> Self {
+    // internal: handles are minted by the manager, not assembled by hand
+    pub(crate) fn new(id: ResourceId, path: impl Into<PathBuf>, core: Arc<OwnershipCore>) -> Self {
         Self {
             id,
             path: path.into(),
+            core,
         }
     }
 
@@ -82,6 +121,15 @@ impl DirectoryResource {
     /// Path on disk.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Acquire a lease on the resource.
+    ///
+    /// While at least one lease is held, the resource cannot be
+    /// physically deleted: explicit release and cleanup passes move it
+    /// to `PendingCleanup` instead. Dropping the lease releases it.
+    pub fn acquire(&self) -> Result<Lease, ConcurrencyError> {
+        self.core.acquire_lease()
     }
 
     /// True when the directory still exists.
@@ -99,12 +147,23 @@ impl DirectoryResource {
 mod tests {
     use super::*;
 
+    fn test_core(dir: &crate::testsupport::TestDir, id: &ResourceId) -> Arc<OwnershipCore> {
+        let shared = crate::namespace::test_shared(dir.path());
+        Arc::new(OwnershipCore::new(
+            shared,
+            id.clone(),
+            crate::core::resource::Ownership::Managed,
+        ))
+    }
+
     #[test]
     fn metadata_roundtrip() {
         let dir = crate::testsupport::TestDir::new();
         let path = dir.path().join("x.bin");
         fs::write(&path, b"hello").unwrap();
-        let res = FileResource::new(ResourceId::new(), &path);
+        let id = ResourceId::new();
+        let core = test_core(&dir, &id);
+        let res = FileResource::new(id.clone(), &path, core);
         assert!(res.exists());
         assert_eq!(res.len().unwrap(), 5);
         assert!(res.modified().is_ok());
@@ -115,7 +174,9 @@ mod tests {
         let dir = crate::testsupport::TestDir::new();
         let path = dir.path().join("scratch");
         fs::create_dir(&path).unwrap();
-        let res = DirectoryResource::new(ResourceId::new(), &path);
+        let id = ResourceId::new();
+        let core = test_core(&dir, &id);
+        let res = DirectoryResource::new(id.clone(), &path, core);
         assert!(res.exists());
         assert_eq!(res.path(), path.as_path());
         assert!(res.modified().is_ok());

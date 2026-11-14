@@ -29,19 +29,22 @@ pub struct Statistics {
     pub resources_released: u64,
     /// Bytes freed since startup.
     pub bytes_freed: u64,
+    /// Leases currently held across all resources.
+    pub active_leases: u64,
 }
 
 impl Statistics {
     /// Human-readable multi-line summary, handy for logs and diagnostics.
     pub fn render(&self) -> String {
         format!(
-            "cachegirl statistics\n  instance:  {}\n  namespaces: {}\n  resources:  {}\n  tracked:    {} bytes\n  expired:    {}\n  pending:    {}\n  gc runs:    {}\n  released:   {}\n  freed:      {} bytes",
+            "cachegirl statistics\n  instance:  {}\n  namespaces: {}\n  resources:  {}\n  tracked:    {} bytes\n  expired:    {}\n  pending:    {}\n  leases:     {}\n  gc runs:    {}\n  released:   {}\n  freed:      {} bytes",
             self.instance_id,
             self.namespaces,
             self.resources,
             self.bytes_tracked,
             self.expired,
             self.pending_cleanup,
+            self.active_leases,
             self.gc_runs,
             self.resources_released,
             self.bytes_freed,
@@ -55,6 +58,7 @@ pub struct StatisticsCollector {
     gc_runs: AtomicU64,
     resources_released: AtomicU64,
     bytes_freed: AtomicU64,
+    active_leases: AtomicU64,
 }
 
 impl StatisticsCollector {
@@ -76,6 +80,29 @@ impl StatisticsCollector {
         self.resources_released
             .fetch_add(removed, Ordering::Relaxed);
         self.bytes_freed.fetch_add(bytes_freed, Ordering::Relaxed);
+    }
+
+    /// Record one lease being acquired.
+    pub(crate) fn record_lease_acquire(&self) {
+        self.active_leases.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one lease being released.
+    pub(crate) fn record_lease_release(&self) {
+        // saturating decrement, spelled out so it works on the MSRV
+        // and never wraps to a huge number on a stray release
+        let mut current = self.active_leases.load(Ordering::Relaxed);
+        while current > 0 {
+            match self.active_leases.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Build a snapshot from the collector and a registry.
@@ -106,6 +133,7 @@ impl StatisticsCollector {
             gc_runs: self.gc_runs.load(Ordering::Relaxed),
             resources_released: self.resources_released.load(Ordering::Relaxed),
             bytes_freed: self.bytes_freed.load(Ordering::Relaxed),
+            active_leases: self.active_leases.load(Ordering::Relaxed),
         })
     }
 
@@ -140,5 +168,24 @@ mod tests {
         assert_eq!(snap.gc_runs, 1);
         assert_eq!(snap.resources_released, 3);
         assert_eq!(snap.bytes_freed, 300);
+        assert_eq!(snap.active_leases, 0);
+    }
+
+    #[test]
+    fn active_leases_counter_moves() {
+        let collector = StatisticsCollector::new();
+        collector.record_lease_acquire();
+        collector.record_lease_acquire();
+        let reg = Registry::new();
+        let snap = collector.snapshot("instance-test", 1, &reg).unwrap();
+        assert_eq!(snap.active_leases, 2);
+        collector.record_lease_release();
+        let snap = collector.snapshot("instance-test", 1, &reg).unwrap();
+        assert_eq!(snap.active_leases, 1);
+        // a stray release must not wrap around
+        collector.record_lease_release();
+        collector.record_lease_release();
+        let snap = collector.snapshot("instance-test", 1, &reg).unwrap();
+        assert_eq!(snap.active_leases, 0);
     }
 }

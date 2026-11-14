@@ -18,6 +18,8 @@ pub struct CleanupReport {
     pub skipped: u64,
     /// Resources that were tried but could not be reclaimed.
     pub failed: u64,
+    /// Resources held back because leases were still active.
+    pub deferred: u64,
     /// Total bytes reclaimed.
     pub bytes_freed: u64,
     /// Wall-clock time the pass took.
@@ -37,8 +39,14 @@ impl fmt::Display for CleanupReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "cleanup: scanned={} removed={} skipped={} failed={} bytes_freed={} in {:?}",
-            self.scanned, self.removed, self.skipped, self.failed, self.bytes_freed, self.duration
+            "cleanup: scanned={} removed={} skipped={} failed={} deferred={} bytes_freed={} in {:?}",
+            self.scanned,
+            self.removed,
+            self.skipped,
+            self.failed,
+            self.deferred,
+            self.bytes_freed,
+            self.duration
         )
     }
 }

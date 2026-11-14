@@ -84,6 +84,8 @@ pub(crate) struct NamespaceShared {
     pub(crate) backends: Backends,
     /// Counters feeding `Statistics`.
     pub(crate) counters: Arc<StatisticsCollector>,
+    /// The manager-wide lease book; resources hand leases out from here.
+    pub(crate) leases: Arc<crate::ownership::LeaseBook>,
     /// Where lifecycle events go.
     pub(crate) sink: Arc<dyn EventSink>,
     /// Serializes resource creation so quota checks stay atomic.
@@ -122,11 +124,14 @@ pub(crate) fn test_shared(root: &std::path::Path) -> Arc<NamespaceShared> {
     let backends = Backends::new(root, "instance-test", SymlinkPolicy::Reject).unwrap();
     #[cfg(not(feature = "filesystem"))]
     let backends = Backends::new().unwrap();
+    let counters = Arc::new(StatisticsCollector::new());
+    let leases = crate::ownership::LeaseBook::with_counters(Arc::clone(&counters));
     Arc::new(NamespaceShared {
         config: Arc::new(config),
         registry,
         backends,
-        counters: Arc::new(StatisticsCollector::new()),
+        leases,
+        counters,
         sink: Arc::new(NullSink),
         create_lock: Mutex::new(()),
         closed: Arc::new(AtomicBool::new(false)),

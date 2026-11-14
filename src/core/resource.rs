@@ -62,6 +62,85 @@ impl FromStr for ResourceId {
     }
 }
 
+/// How a resource's lifetime is tied to its handles and to cleanup policy.
+///
+/// Chosen at creation time through [`crate::CreateOptions::ownership`] and
+/// recorded in the registry record. Leases always gate physical deletion,
+/// in every mode: while at least one [`crate::Lease`] is held, the
+/// resource is never destroyed, only marked `PendingCleanup`.
+///
+/// The same four modes apply to files, buffers, cache entries,
+/// serialization intermediates, runtime markers and custom resources.
+///
+/// # Example
+///
+/// ```
+/// use cachegirl::{Ownership, TempManager};
+///
+/// let dir = std::env::temp_dir().join(format!("cachegirl-own-{}", std::process::id()));
+/// let manager = TempManager::builder()
+///     .root(&dir)
+///     .build()?;
+/// let ns = manager.namespace("scratch")?;
+///
+/// // Owned: dropping the handle deletes the file from disk.
+/// let file = ns.create_file_with(
+///     "owned.bin",
+///     cachegirl::CreateOptions::new().ownership(Ownership::Owned),
+/// )?;
+/// let path = file.path().to_path_buf();
+/// drop(file);
+/// assert!(!path.exists());
+///
+/// manager.shutdown()?;
+/// let _ = std::fs::remove_dir_all(&dir);
+/// # Ok::<(), cachegirl::Error>(())
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Ownership {
+    /// Single-owner semantics. Dropping the last owning handle destroys
+    /// the resource through its backend. If leases are still held at
+    /// drop time, destruction is deferred: the record is marked
+    /// `PendingCleanup` and a cleanup pass destroys it once the last
+    /// lease is gone.
+    Owned,
+    /// Policy-driven lifetime. The resource lives until it is released
+    /// explicitly, expires under a TTL, or is picked up by a cleanup
+    /// pass. Dropping the handle only detaches it; the registry record
+    /// and the physical resource are left alone. This is the default.
+    #[default]
+    Managed,
+    /// Shared ownership with Arc-like semantics. Every clone of the
+    /// handle is a co-owner; the resource is destroyed when the last
+    /// one drops, subject to the same lease rule as `Owned`.
+    Shared,
+    /// Lease-centric ownership. Dropping the handle detaches it; the
+    /// resource is only ever reclaimed through explicit release or a
+    /// cleanup pass, and both are refused while leases are held (the
+    /// resource moves to `PendingCleanup` instead of being deleted).
+    Leased,
+}
+
+impl Ownership {
+    /// True for modes that destroy the resource when the last handle drops.
+    pub(crate) fn drop_destroys(self) -> bool {
+        matches!(self, Ownership::Owned | Ownership::Shared)
+    }
+}
+
+impl fmt::Display for Ownership {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Ownership::Owned => "owned",
+            Ownership::Managed => "managed",
+            Ownership::Shared => "shared",
+            Ownership::Leased => "leased",
+        };
+        f.write_str(s)
+    }
+}
+
 /// What kind of resource this is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -121,6 +200,8 @@ pub struct ResourceMeta {
     pub state: ResourceState,
     /// How long the resource may live, if a TTL applies.
     pub ttl: Option<std::time::Duration>,
+    /// Ownership mode chosen at creation time.
+    pub ownership: Ownership,
     /// Free-form user metadata.
     pub metadata: HashMap<String, String>,
 }
@@ -140,6 +221,7 @@ impl ResourceMeta {
             size_bytes: 0,
             state: ResourceState::Created,
             ttl: None,
+            ownership: Ownership::Managed,
             metadata: HashMap::new(),
         }
     }

@@ -203,6 +203,9 @@ pub enum ConcurrencyError {
     /// The lease limit for the resource was reached.
     #[error("lease limit reached for resource `{0}`")]
     LeaseLimit(ResourceId),
+    /// The resource is being destroyed right now; new leases are refused.
+    #[error("resource `{0}` is being destroyed and cannot accept leases")]
+    Destroying(ResourceId),
     /// The operation was cancelled.
     #[error("the operation was cancelled")]
     Cancelled,

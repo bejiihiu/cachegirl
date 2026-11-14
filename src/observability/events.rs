@@ -58,6 +58,12 @@ pub enum Event {
 }
 
 /// Destination for [`Event`]s.
+///
+/// Sinks are called synchronously from the operations that emit them,
+/// including from destructors. They should be cheap and they should not
+/// panic: a panicking sink aborts the operation it was attached to and,
+/// when destruction is in progress, leaves the resource's bookkeeping
+/// in an unknown state (the physical side may already be gone).
 pub trait EventSink: Send + Sync {
     /// Consume one event.
     fn emit(&self, event: &Event);

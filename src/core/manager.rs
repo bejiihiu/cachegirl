@@ -187,8 +187,10 @@ impl TempManager {
     /// Reclaim all resources in `Expired` or `PendingCleanup` state.
     ///
     /// Explicit by design: the application decides when this runs.
+    /// Resources with active leases are never destroyed; they are
+    /// deferred and counted as such in the report.
     pub fn cleanup_expired(&self) -> Result<CleanupReport> {
-        let engine = CleanupEngine::new(Arc::clone(&self.registry));
+        let engine = CleanupEngine::new(Arc::clone(&self.shared));
         let report = engine.cleanup()?;
         self.counters
             .record_gc_run(report.removed, report.bytes_freed);
@@ -407,11 +409,13 @@ impl TempManagerBuilder {
         let registry = Arc::new(crate::core::registry::Registry::new());
         let counters = Arc::new(StatisticsCollector::new());
         let closed = Arc::new(AtomicBool::new(false));
+        let leases = crate::ownership::LeaseBook::with_counters(Arc::clone(&counters));
         let shared = Arc::new(NamespaceShared {
             config: Arc::new(config.clone()),
             registry: Arc::clone(&registry),
             backends,
             counters: Arc::clone(&counters),
+            leases,
             sink: self.event_sink,
             create_lock: Mutex::new(()),
             closed: Arc::clone(&closed),

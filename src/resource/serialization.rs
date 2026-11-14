@@ -1,27 +1,40 @@
 //! A serialization intermediate registered in the registry.
 //!
 //! Used for (de)serialization payloads that exist for the duration of
-//! one pass and then go away. Owns the bytes; the registry entry
-//! follows the namespace's cleanup rules.
+//! one pass and then go away. Owns the bytes; what happens on drop
+//! depends on the ownership mode the resource was created with.
 
+use std::sync::Arc;
+
+use crate::core::error::ConcurrencyError;
 use crate::core::resource::ResourceId;
+use crate::ownership::{Lease, OwnershipCore};
 
 /// A registered serialization intermediate.
 #[derive(Clone, Debug)]
 pub struct SerializationResource {
     id: ResourceId,
     bytes: Vec<u8>,
+    core: Arc<OwnershipCore>,
 }
 
 impl SerializationResource {
-    /// Wrap bytes with their resource id.
-    pub fn new(id: ResourceId, bytes: Vec<u8>) -> Self {
-        Self { id, bytes }
+    pub(crate) fn new(id: ResourceId, bytes: Vec<u8>, core: Arc<OwnershipCore>) -> Self {
+        Self { id, bytes, core }
     }
 
     /// Resource id in the registry.
     pub fn id(&self) -> &ResourceId {
         &self.id
+    }
+
+    /// Acquire a lease on the resource.
+    ///
+    /// While at least one lease is held, the resource cannot be
+    /// physically released: explicit release and cleanup passes move it
+    /// to `PendingCleanup` instead. Dropping the lease releases it.
+    pub fn acquire(&self) -> Result<Lease, ConcurrencyError> {
+        self.core.acquire_lease()
     }
 
     /// Borrow the bytes.
@@ -40,8 +53,11 @@ impl SerializationResource {
     }
 
     /// Consume the handle and return the inner vec.
-    pub fn into_vec(self) -> Vec<u8> {
-        self.bytes
+    ///
+    /// Consuming the handle drops it; the ownership mode applies to it
+    /// like to any other drop.
+    pub fn into_vec(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
     }
 }
 

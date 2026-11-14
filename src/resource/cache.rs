@@ -5,6 +5,7 @@ use std::time::SystemTime;
 
 use crate::core::error::ConcurrencyError;
 use crate::core::resource::ResourceId;
+use crate::ownership::{Lease, OwnershipCore};
 
 /// One cached value with its access bookkeeping.
 #[derive(Clone, Debug)]
@@ -115,23 +116,46 @@ impl CacheStore {
 
 /// Handle to a cache entry registered in the registry.
 ///
-/// The bytes are owned by the entry itself; removing the resource from
-/// the registry (through `Namespace::release` or a cleanup pass) drops
-/// the entry from the store.
+/// The bytes are owned by the entry itself. What happens on drop
+/// depends on the ownership mode the entry was created with: `Managed`
+/// and `Leased` handles detach, `Owned` and `Shared` handles release
+/// the entry from the store. Destruction stands down while leases are
+/// held.
+#[derive(Clone)]
 pub struct CacheEntryResource {
     id: ResourceId,
     key: String,
     entry: SharedEntry,
+    core: Arc<OwnershipCore>,
 }
 
 impl CacheEntryResource {
-    pub(crate) fn new(id: ResourceId, key: String, entry: SharedEntry) -> Self {
-        Self { id, key, entry }
+    pub(crate) fn new(
+        id: ResourceId,
+        key: String,
+        entry: SharedEntry,
+        core: Arc<OwnershipCore>,
+    ) -> Self {
+        Self {
+            id,
+            key,
+            entry,
+            core,
+        }
     }
 
     /// Resource id in the registry.
     pub fn id(&self) -> &ResourceId {
         &self.id
+    }
+
+    /// Acquire a lease on the resource.
+    ///
+    /// While at least one lease is held, the resource cannot be
+    /// physically released: explicit release and cleanup passes move it
+    /// to `PendingCleanup` instead. Dropping the lease releases it.
+    pub fn acquire(&self) -> Result<Lease, ConcurrencyError> {
+        self.core.acquire_lease()
     }
 
     /// Lookup key of the entry.

@@ -15,7 +15,7 @@ use crate::backend::ResourceRequest;
 #[cfg(any(feature = "memory", feature = "cache"))]
 use crate::core::error::ConfigError;
 use crate::core::error::{BackendError, ConcurrencyError, RegistryError, Result};
-use crate::core::resource::{ResourceKind, ResourceMeta};
+use crate::core::resource::{ResourceId, ResourceKind, ResourceMeta};
 use crate::namespace::{Namespace, validate_resource_name};
 use crate::observability::Event;
 
@@ -26,6 +26,12 @@ pub struct CreateOptions {
     pub owner: Option<String>,
     /// TTL override; falls back to the manager's `default_ttl`.
     pub ttl: Option<Duration>,
+    /// How the resource's lifetime is tied to its handles.
+    ///
+    /// Defaults to [`crate::Ownership::Managed`]: the resource lives
+    /// until it is released or reclaimed by a cleanup pass. See
+    /// [`crate::Ownership`] for the full semantics of every mode.
+    pub ownership: crate::core::resource::Ownership,
     /// Free-form metadata attached to the registry record.
     pub metadata: HashMap<String, String>,
 }
@@ -45,6 +51,14 @@ impl CreateOptions {
     /// Give the resource its own TTL instead of the manager default.
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
+        self
+    }
+
+    /// Choose the ownership mode for the resource.
+    ///
+    /// See [`crate::Ownership`] for what each mode does on drop.
+    pub fn ownership(mut self, ownership: crate::core::resource::Ownership) -> Self {
+        self.ownership = ownership;
         self
     }
 
@@ -68,6 +82,19 @@ impl Namespace {
             .create_lock
             .lock()
             .map_err(|_| ConcurrencyError::Poisoned.into())
+    }
+
+    /// Mint the ownership core for a freshly created resource.
+    fn ownership_core(
+        &self,
+        id: &ResourceId,
+        mode: crate::core::resource::Ownership,
+    ) -> std::sync::Arc<crate::ownership::OwnershipCore> {
+        std::sync::Arc::new(crate::ownership::OwnershipCore::new(
+            std::sync::Arc::clone(self.shared()),
+            id.clone(),
+            mode,
+        ))
     }
 
     /// Enforce manager-wide and namespace quotas for `added_bytes`.
@@ -139,6 +166,7 @@ impl Namespace {
         let mut meta = backend.create(&request)?;
         meta.ttl = options.ttl.or(shared.config.default_ttl);
         meta.owner = options.owner;
+        meta.ownership = options.ownership;
         for (k, v) in options.metadata {
             meta.metadata.insert(k, v);
         }
@@ -192,7 +220,8 @@ impl Namespace {
     ) -> Result<crate::resource::FileResource> {
         let meta = self.create_with(name, ResourceKind::File, None, None, options)?;
         let path = std::path::PathBuf::from(meta.metadata.get("path").cloned().unwrap_or_default());
-        Ok(crate::resource::FileResource::new(meta.id, path))
+        let core = self.ownership_core(&meta.id, meta.ownership);
+        Ok(crate::resource::FileResource::new(meta.id, path, core))
     }
 
     /// Create a directory `root/<instance>/<namespace>/<name>`.
@@ -210,7 +239,8 @@ impl Namespace {
     ) -> Result<crate::resource::DirectoryResource> {
         let meta = self.create_with(name, ResourceKind::Directory, None, None, options)?;
         let path = std::path::PathBuf::from(meta.metadata.get("path").cloned().unwrap_or_default());
-        Ok(crate::resource::DirectoryResource::new(meta.id, path))
+        let core = self.ownership_core(&meta.id, meta.ownership);
+        Ok(crate::resource::DirectoryResource::new(meta.id, path, core))
     }
 
     // -- in-memory resources ----------------------------------------------
@@ -235,9 +265,11 @@ impl Namespace {
             .map_err(|_| ConfigError::Invalid("buffer capacity does not fit into u64".into()))?;
         let name = anonymous_name("buffer");
         let meta = self.create_with(&name, ResourceKind::Buffer, Some(hint), None, options)?;
+        let core = self.ownership_core(&meta.id, meta.ownership);
         Ok(crate::resource::BufferResource::new(
             meta.id,
             crate::resource::Buffer::with_capacity(capacity),
+            core,
         ))
     }
 
@@ -263,7 +295,10 @@ impl Namespace {
             .map_err(|_| ConfigError::Invalid("payload does not fit into u64".into()))?;
         let meta =
             self.create_with(name, ResourceKind::Serialization, Some(size), None, options)?;
-        Ok(crate::resource::SerializationResource::new(meta.id, bytes))
+        let core = self.ownership_core(&meta.id, meta.ownership);
+        Ok(crate::resource::SerializationResource::new(
+            meta.id, bytes, core,
+        ))
     }
 
     /// Register a runtime-scoped resource tied to the current operation or session.
@@ -283,7 +318,10 @@ impl Namespace {
         options: CreateOptions,
     ) -> Result<crate::resource::RuntimeResource> {
         let meta = self.create_with(name, ResourceKind::Runtime, Some(0), None, options)?;
-        Ok(crate::resource::RuntimeResource::new(meta.id, meta.name))
+        let core = self.ownership_core(&meta.id, meta.ownership);
+        Ok(crate::resource::RuntimeResource::new(
+            meta.id, meta.name, core,
+        ))
     }
 
     // -- cache resources ----------------------------------------------------
@@ -339,10 +377,12 @@ impl Namespace {
             meta.id.clone(),
             std::sync::Arc::clone(&entry),
         );
+        let core = self.ownership_core(&meta.id, meta.ownership);
         Ok(crate::resource::CacheEntryResource::new(
             meta.id,
             key.to_owned(),
             entry,
+            core,
         ))
     }
 
@@ -393,9 +433,11 @@ impl Namespace {
         options: CreateOptions,
     ) -> Result<crate::resource::CustomResource> {
         let meta = self.create_with(name, ResourceKind::Custom, None, Some(backend), options)?;
+        let core = self.ownership_core(&meta.id, meta.ownership);
         Ok(crate::resource::CustomResource::new(
             meta.id,
             backend.to_owned(),
+            core,
         ))
     }
 
@@ -407,6 +449,11 @@ impl Namespace {
     /// `Ok(false)` / [`RegistryError::NotFound`] respectively. The
     /// physical resource is destroyed via its backend before the registry
     /// entry is dropped, and a release event is emitted.
+    ///
+    /// **Leases win over release.** If any lease is held on the resource,
+    /// it is not destroyed: the record moves to `PendingCleanup`, the
+    /// entry stays in the registry, and this returns `Ok(false)`. Try
+    /// again after the leases are gone, or let a cleanup pass finish it.
     pub fn release(&self, id: &crate::core::resource::ResourceId) -> Result<bool> {
         let shared = self.shared();
         let meta = match shared.registry.get(id) {
@@ -419,41 +466,11 @@ impl Namespace {
             return Err(RegistryError::NotFound(id.clone()).into());
         }
 
-        let backend_name = meta
-            .metadata
-            .get("backend")
-            .cloned()
-            .or_else(|| super::Backends::name_for_kind(meta.kind).map(str::to_owned));
-        let backend = backend_name
-            .as_deref()
-            .and_then(|name| shared.backends.lookup(name))
-            .ok_or_else(|| BackendError::Unavailable {
-                backend: backend_name.unwrap_or_else(|| "unknown".to_string()),
-                reason: "the backend required to release this resource is not available"
-                    .to_string(),
-            })?;
-        backend.release(&meta)?;
-
-        #[cfg(feature = "cache")]
-        if meta.kind == ResourceKind::Cache {
-            if let Some(key) = meta.metadata.get("cache_key") {
-                shared.backends.cache_store.remove(&self.name, key);
-            }
+        match crate::ownership::destroy_resource(shared, id)? {
+            crate::ownership::DestroyOutcome::Destroyed => Ok(true),
+            crate::ownership::DestroyOutcome::AlreadyGone
+            | crate::ownership::DestroyOutcome::Deferred => Ok(false),
         }
-
-        let removed = match shared.registry.remove(id) {
-            Ok(removed) => removed,
-            // someone else released it concurrently; physical side is idempotent
-            Err(RegistryError::NotFound(_)) => return Ok(false),
-            Err(source) => return Err(source.into()),
-        };
-        shared.counters.record_release(1, removed.size_bytes);
-        shared.emit(Event::ResourceReleased {
-            instance: shared.config.instance_id.clone(),
-            id: removed.id,
-            bytes_freed: removed.size_bytes,
-        });
-        Ok(true)
     }
 
     /// Re-stat a file/directory resource and update its tracked size.
@@ -1050,6 +1067,422 @@ mod tests {
             err,
             Error::Concurrency(ConcurrencyError::ManagerClosed)
         ));
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn owned_drop_deletes_file_from_disk() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("owned-drop").unwrap();
+
+        let file = ns
+            .create_file_with(
+                "owned.bin",
+                CreateOptions::new().ownership(crate::core::resource::Ownership::Owned),
+            )
+            .unwrap();
+        let path = file.path().to_path_buf();
+        let id = file.id().clone();
+        assert!(path.is_file());
+        drop(file);
+
+        // physical side is gone, registry is empty, stats moved
+        assert!(!path.exists());
+        assert!(manager.registry().get(&id).is_err());
+        let stats = manager.stats().unwrap();
+        assert_eq!(stats.resources_released, 1);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn managed_drop_keeps_file_and_registration() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("managed-drop").unwrap();
+
+        let file = ns.create_file("managed.bin").unwrap();
+        let path = file.path().to_path_buf();
+        let id = file.id().clone();
+        drop(file);
+
+        assert!(path.is_file());
+        assert!(manager.registry().get(&id).is_ok());
+        assert!(ns.release(&id).unwrap());
+        assert!(!path.exists());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn shared_last_drop_destroys_the_file() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("shared-drop").unwrap();
+
+        let file = ns
+            .create_file_with(
+                "shared.bin",
+                CreateOptions::new().ownership(crate::core::resource::Ownership::Shared),
+            )
+            .unwrap();
+        let path = file.path().to_path_buf();
+        let clone = file.clone();
+        drop(file);
+        // one owner is still around: nothing may be destroyed
+        assert!(path.is_file());
+        drop(clone);
+
+        assert!(!path.exists());
+        assert_eq!(manager.registry().len().unwrap(), 0);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn leased_release_defers_until_leases_drop() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("leased").unwrap();
+
+        let file = ns
+            .create_file_with(
+                "leased.bin",
+                CreateOptions::new().ownership(crate::core::resource::Ownership::Leased),
+            )
+            .unwrap();
+        let path = file.path().to_path_buf();
+        let id = file.id().clone();
+        let lease = file.acquire().unwrap();
+
+        // release must refuse to destroy while the lease is held
+        assert!(!ns.release(&id).unwrap());
+        assert!(path.is_file());
+        let meta = manager.registry().get(&id).unwrap();
+        assert_eq!(meta.state, ResourceState::PendingCleanup);
+
+        drop(lease);
+        assert!(ns.release(&id).unwrap());
+        assert!(!path.exists());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn cleanup_never_destroys_a_leased_resource() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("cleanup-lease").unwrap();
+
+        let file = ns.create_file("held.bin").unwrap();
+        let path = file.path().to_path_buf();
+        let id = file.id().clone();
+        let lease = file.acquire().unwrap();
+
+        manager
+            .registry()
+            .set_state(&id, ResourceState::Expired)
+            .unwrap();
+
+        let report = manager.cleanup_expired().unwrap();
+        assert_eq!(report.removed, 0);
+        assert_eq!(report.deferred, 1);
+        assert!(path.is_file());
+        // the lease is untouched by the failed destruction attempt
+        assert_eq!(manager.stats().unwrap().active_leases, 1);
+
+        drop(lease);
+        let report = manager.cleanup_expired().unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!path.exists());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn owned_drop_under_lease_defers_then_cleanup_finishes() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("owned-leased").unwrap();
+
+        let file = ns
+            .create_file_with(
+                "owned-held.bin",
+                CreateOptions::new().ownership(crate::core::resource::Ownership::Owned),
+            )
+            .unwrap();
+        let path = file.path().to_path_buf();
+        let id = file.id().clone();
+        let lease = file.acquire().unwrap();
+        drop(file); // owner is gone, lease still held
+
+        assert!(path.is_file());
+        let meta = manager.registry().get(&id).unwrap();
+        assert_eq!(meta.state, ResourceState::PendingCleanup);
+
+        drop(lease);
+        let report = manager.cleanup_expired().unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!path.exists());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn concurrent_leases_on_one_resource_are_all_counted() {
+        use std::sync::Barrier;
+
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("concurrent-leases").unwrap();
+        let file = Arc::new(ns.create_file("hot.bin").unwrap());
+
+        let barrier = Arc::new(Barrier::new(5));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let file = Arc::clone(&file);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let mut leases = Vec::new();
+                for _ in 0..25 {
+                    leases.push(file.acquire().unwrap());
+                }
+                (leases.len(), leases)
+            }));
+        }
+        barrier.wait();
+        let keepers: Vec<_> = handles.into_iter().map(|h| h.join().unwrap().1).collect();
+        let total: usize = keepers.iter().map(Vec::len).sum();
+        assert_eq!(total, 100);
+        assert_eq!(manager.stats().unwrap().active_leases, 100);
+
+        drop(keepers);
+        assert_eq!(manager.stats().unwrap().active_leases, 0);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn lease_can_move_to_another_thread() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("lease-move").unwrap();
+        let file = ns.create_file("portable.bin").unwrap();
+        let lease = file.acquire().unwrap();
+        assert_eq!(manager.stats().unwrap().active_leases, 1);
+
+        std::thread::spawn(move || {
+            drop(lease);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(manager.stats().unwrap().active_leases, 0);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn panicking_leaseholder_does_not_leak_counts() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("panic-lease").unwrap();
+        let file = ns.create_file("unwind.bin").unwrap();
+
+        let before = manager.stats().unwrap().active_leases;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _lease = file.acquire().unwrap();
+            panic!("simulated worker failure");
+        }));
+        assert!(result.is_err());
+        assert_eq!(manager.stats().unwrap().active_leases, before);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn deferred_release_still_counts_against_quota() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = TempManager::builder()
+            .root(dir.path())
+            .instance_id("instance-create")
+            .max_size(1024)
+            .build()
+            .unwrap();
+        let ns = manager.namespace("quota-lease").unwrap();
+
+        let buf = ns.create_buffer(512).unwrap();
+        let id = buf.id().clone();
+        let lease = buf.acquire().unwrap();
+
+        // release is deferred, bytes must stay accounted
+        assert!(!ns.release(&id).unwrap());
+        assert!(ns.create_buffer(600).is_err());
+
+        drop(lease);
+        // the deferred record is pending cleanup and gets reclaimed here
+        let report = manager.cleanup_expired().unwrap();
+        assert_eq!(report.removed, 1);
+
+        // bytes are free again, creation works
+        let _second = ns.create_buffer(600).unwrap();
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn statistics_track_active_leases_across_resources() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("lease-stats").unwrap();
+
+        let a = ns.create_file("a.bin").unwrap();
+        let b = ns.create_file("b.bin").unwrap();
+        let l1 = a.acquire().unwrap();
+        let l2 = a.acquire().unwrap();
+        let l3 = b.acquire().unwrap();
+        assert_eq!(manager.stats().unwrap().active_leases, 3);
+
+        drop(l1);
+        assert_eq!(manager.stats().unwrap().active_leases, 2);
+        drop(l2);
+        drop(l3);
+        assert_eq!(manager.stats().unwrap().active_leases, 0);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn owned_buffer_drop_releases_backend_accounting() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("owned-buffer").unwrap();
+
+        let buf = ns
+            .create_buffer_with(
+                128,
+                CreateOptions::new().ownership(crate::core::resource::Ownership::Owned),
+            )
+            .unwrap();
+        let id = buf.id().clone();
+        assert_eq!(manager.registry().get(&id).unwrap().size_bytes, 128);
+        drop(buf);
+
+        assert!(manager.registry().get(&id).is_err());
+        assert_eq!(manager.stats().unwrap().bytes_tracked, 0);
+        assert_eq!(manager.stats().unwrap().resources, 0);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "cache")]
+    #[test]
+    fn owned_cache_entry_drop_removes_it_from_the_store() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("owned-cache").unwrap();
+
+        let entry = ns
+            .create_cache_entry_with(
+                "pkt-owned",
+                vec![1, 2, 3],
+                CreateOptions::new().ownership(crate::core::resource::Ownership::Owned),
+            )
+            .unwrap();
+        assert!(ns.cache_get("pkt-owned").unwrap().is_some());
+        drop(entry);
+
+        assert!(ns.cache_get("pkt-owned").unwrap().is_none());
+        assert_eq!(manager.stats().unwrap().bytes_tracked, 0);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn owned_custom_resource_drop_releases_exactly_once_across_threads() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let backend = Arc::new(CountingBackend {
+            created: std::sync::atomic::AtomicU64::new(0),
+            released: std::sync::atomic::AtomicU64::new(0),
+        });
+        manager.register_backend(backend.clone()).unwrap();
+
+        let ns = manager.namespace("owned-custom").unwrap();
+        let res = ns
+            .create_custom_with(
+                "widget",
+                "counting",
+                CreateOptions::new().ownership(crate::core::resource::Ownership::Shared),
+            )
+            .unwrap();
+        let clone = res.clone();
+
+        // both clones drop concurrently on different threads; the
+        // backend must observe exactly one release
+        let t = std::thread::spawn(move || drop(clone));
+        drop(res);
+        t.join().unwrap();
+        assert_eq!(backend.released.load(Ordering::Relaxed), 1);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn drop_and_concurrent_release_destroy_exactly_once() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("drop-vs-release").unwrap();
+
+        let file = ns
+            .create_file_with(
+                "race.bin",
+                CreateOptions::new().ownership(crate::core::resource::Ownership::Owned),
+            )
+            .unwrap();
+        let path = file.path().to_path_buf();
+        let id = file.id().clone();
+
+        let ns2 = manager.namespace("drop-vs-release").unwrap();
+        let id2 = id.clone();
+        let releaser = std::thread::spawn(move || ns2.release(&id2));
+        drop(file); // owned drop races the explicit release
+        let _ = releaser.join().unwrap().unwrap();
+
+        // whoever won, the file is gone and the registry is empty
+        assert!(!path.exists());
+        assert!(manager.registry().get(&id).is_err());
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "filesystem")]
+    #[test]
+    fn shared_clones_cross_threads() {
+        let dir = crate::testsupport::TestDir::new();
+        let manager = manager(dir.path());
+        let ns = manager.namespace("shared-threads").unwrap();
+
+        let file = ns
+            .create_file_with(
+                "shared-thread.bin",
+                CreateOptions::new().ownership(crate::core::resource::Ownership::Shared),
+            )
+            .unwrap();
+        let path = file.path().to_path_buf();
+
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let clone = file.clone();
+            handles.push(std::thread::spawn(move || drop(clone)));
+        }
+        drop(file);
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(!path.exists());
+        assert_eq!(manager.registry().len().unwrap(), 0);
+        manager.shutdown().unwrap();
     }
 
     #[cfg(feature = "filesystem")]

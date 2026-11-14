@@ -14,6 +14,12 @@
 //!
 //! - **No forced runtime.** The core never requires an async runtime
 //!   or background threads. You call cleanup when it makes sense.
+//! - **Explicit ownership.** Every resource is created with an
+//!   [`Ownership`] mode. Dropping the last owning handle destroys an
+//!   `Owned`/`Shared` resource for real; `Managed` and `Leased`
+//!   resources live until release or cleanup. Leases protect a resource
+//!   while it is in use: `handle.acquire()` hands out an RAII lease and
+//!   nothing is physically deleted while one is held.
 //! - **No forced layout.** You choose the root directory; the library
 //!   never imposes `/tmp` or any other location.
 //! - **No global state.** Independent managers can coexist in one
@@ -73,7 +79,7 @@ pub use core::error::{
 pub use core::lifecycle::ResourceState;
 pub use core::manager::{ManagerConfig, SymlinkPolicy, TempManager, TempManagerBuilder};
 pub use core::registry::Registry;
-pub use core::resource::{ResourceId, ResourceKind, ResourceMeta};
+pub use core::resource::{Ownership, ResourceId, ResourceKind, ResourceMeta};
 pub use namespace::{CreateOptions, Namespace, NamespaceQuota};
 #[cfg(feature = "tracing")]
 pub use observability::TracingSink;
