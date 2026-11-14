@@ -14,7 +14,7 @@
 
 </td>
 <td width="220" valign="middle" align="center">
-<img src="assets/icon.png" alt="Cachegirl - the cachegirl mascot, a pink girl with a folder" width="200">
+<img src="https://raw.githubusercontent.com/bejiihiu/cachegirl/main/assets/icon.png" alt="Cachegirl - the cachegirl mascot, a pink girl with a folder" width="200">
 </td>
 </tr>
 </table>
@@ -67,7 +67,7 @@
 
 ```toml
 [dependencies]
-cachegirl = { version = "0.1" }
+cachegirl = { version = "1.0" }
 ```
 
 ## Documentation
@@ -75,6 +75,7 @@ cachegirl = { version = "0.1" }
 - Guides and recipes live in [`docs/`](docs/).
 - API reference: [docs.rs/cachegirl](https://docs.rs/cachegirl)
   (build it locally with `cargo doc --all-features --open`).
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
 - Repository: <https://github.com/bejiihiu/cachegirl>
 
 ## License

@@ -1,6 +1,6 @@
 [package]
 name = "cachegirl"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Centralized management of temporary resources in Rust: files, buffers, caches, and scratch data with namespaces, quotas, leases, cleanup policies, and crash recovery"
@@ -11,7 +11,10 @@ documentation = "https://docs.rs/cachegirl"
 keywords = ["cache", "temporary", "tempfile", "cleanup", "resources"]
 categories = ["caching", "filesystem", "memory-management", "concurrency", "rust-patterns"]
 readme = "README.md"
-exclude = ["IDEA.md", "notes.md", ".github/"]
+# README references assets/icon.png through an absolute raw.githubusercontent
+# URL (relative paths do not render on crates.io), so the 1.7 MB icon stays out
+# of the published package
+exclude = ["IDEA.md", "notes.md", ".github/", "assets/"]
 autobenches = false
 
 [features]
@@ -82,6 +85,7 @@ required-features = ["tracing", "filesystem"]
 name = "metrics_usage"
 required-features = ["metrics", "filesystem"]
 
+# docs.rs builds with all features; no `--cfg docsrs` needed since the tree
+# has no `#[cfg(docsrs)]` gates
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]

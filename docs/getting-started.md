@@ -11,7 +11,7 @@ Add the crate to `Cargo.toml`:
 
 ```toml
 [dependencies]
-cachegirl = { version = "0.1" }
+cachegirl = { version = "1.0" }
 ```
 
 The default feature set enables the `filesystem` backend, which is what
