@@ -238,6 +238,18 @@ pub enum ConfigError {
     /// The instance id failed validation.
     #[error("invalid instance id `{0}`")]
     InvalidInstanceId(String),
+    /// A directory the manager needs to adopt is owned by another user.
+    #[error(
+        "directory `{dir}` is owned by uid {owner_uid}, but the current user is uid {current_uid}"
+    )]
+    DirNotOwned {
+        /// The directory that failed the ownership check.
+        dir: PathBuf,
+        /// uid that owns the directory.
+        owner_uid: u32,
+        /// uid of the current process.
+        current_uid: u32,
+    },
     /// The namespace name failed validation.
     #[error("invalid namespace name `{0}`")]
     InvalidNamespaceName(String),
@@ -451,6 +463,14 @@ mod tests {
         assert!(create.contains("permission denied"));
         let instance = render(&ConfigError::InvalidInstanceId("bad id".into()));
         assert!(instance.contains("bad id"));
+        let owned = render(&ConfigError::DirNotOwned {
+            dir: PathBuf::from("/shared/root"),
+            owner_uid: 0,
+            current_uid: 1000,
+        });
+        assert!(owned.contains("/shared/root"));
+        assert!(owned.contains("0"));
+        assert!(owned.contains("1000"));
         let namespace = render(&ConfigError::InvalidNamespaceName("a/b".into()));
         assert!(namespace.contains("a/b"));
         let invalid = render(&ConfigError::Invalid("unsupported option".into()));

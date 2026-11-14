@@ -665,6 +665,14 @@ impl TempManagerBuilder {
     }
 
     /// Validate and build the manager.
+    ///
+    /// Directory adoption is guarded differently per platform: on Unix,
+    /// an existing `root` (or `root/<instance_id>`) owned by a different
+    /// user fails with [`ConfigError::DirNotOwned`] instead of being
+    /// adopted and written into; on Windows this check degrades to
+    /// existence, because the standard library exposes no ownership
+    /// primitive there. Directories created by the build are owned by
+    /// the current user by construction.
     pub fn build(self) -> Result<TempManager> {
         let root = self
             .root
@@ -713,6 +721,9 @@ impl TempManagerBuilder {
                 path: config.root.clone(),
                 source,
             })?;
+        // adopt, don't hijack: on unix an existing root owned by another
+        // user fails the build, on other platforms only existence is known
+        crate::core::owner::ensure_owned_by_current_user(&root)?;
         let config = ManagerConfig { root, ..config };
 
         let recovery_report: Option<RecoveryReport>;
@@ -763,12 +774,17 @@ impl TempManagerBuilder {
             } else {
                 recovery_report = None;
             }
+            // refuse to adopt a foreign instance dir before writing anything into it
+            let instance_dir = config.root.join(&config.instance_id);
+            crate::core::owner::ensure_owned_by_current_user(&instance_dir)?;
             recovery
                 .write_lock(&config.instance_id)
                 .map_err(|source| ConfigError::RootCreate {
                     path: config.root.join(&config.instance_id),
                     source,
                 })?;
+            // created or adopted: re-check now that the directory certainly exists
+            crate::core::owner::ensure_owned_by_current_user(&instance_dir)?;
         }
 
         #[cfg(feature = "filesystem")]

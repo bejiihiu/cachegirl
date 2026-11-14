@@ -6,6 +6,8 @@ pub mod manager;
 pub mod registry;
 pub mod resource;
 
+pub(crate) mod owner;
+
 /// Sum byte counters without panicking on overflow.
 ///
 /// A registry record can legitimately carry `size_bytes == u64::MAX`

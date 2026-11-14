@@ -116,15 +116,22 @@ is strong evidence that a human should look. See
 
 ## Filesystem permissions
 
-The manager never sets, relaxes or audits permissions: files and
-directories are created with the process's umask, lock files are
-written with default permissions, and nothing is ever marked
-read-only. If you need a root readable only by the service account,
-create it with those permissions yourself and run the service as that
-account. On multi-user machines, `root` must not be writable by
-untrusted users — the confinement checks detect escapes, they do not
-prevent a co-located writer from deleting or replacing your files
-within the root.
+On Unix, adopting a directory is ownership-checked: an existing `root`
+(or `root/<instance_id>`) owned by a different user fails the build with
+`ConfigError::DirNotOwned` instead of being adopted and written into.
+Directories the build creates are owned by the current user by
+construction. On Windows this check degrades to existence, because the
+standard library exposes no ownership primitive there — existence is the
+whole check, and the same umask-style caveats apply.
+
+The manager never sets, relaxes or audits permissions otherwise: files
+and directories are created with the process's umask, lock files are
+written with default permissions, and nothing is ever marked read-only.
+If you need a root readable only by the service account, create it with
+those permissions yourself and run the service as that account. On
+multi-user machines, `root` must not be writable by untrusted users —
+the confinement checks detect escapes, they do not prevent a co-located
+writer from deleting or replacing your files within the root.
 
 ## Deployment recommendations
 
