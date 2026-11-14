@@ -638,6 +638,20 @@ impl Namespace {
     ///
     /// Returns the size that is now recorded. Memory-backed resources
     /// report the size recorded at creation.
+    ///
+    /// This is an observational call, not an enforcement point. If the
+    /// resource grew past its namespace or manager quota since creation,
+    /// `refresh_size` does **not** fail, trim or otherwise reject the
+    /// resource: it records and returns the size it observes. Quotas are
+    /// checked at creation time, and cleanup eviction works off the
+    /// recorded sizes — an over-quota file therefore stays tracked and
+    /// becomes eviction fodder for the next cleanup pass that fits the
+    /// bill, rather than erroring here. (Byte accounting saturates at
+    /// `u64::MAX` instead of overflowing.)
+    ///
+    /// If you need a hard ceiling, that lives at the quota layer, not in
+    /// this re-stat: set `max_size` on the manager or the namespace and
+    /// let cleanup policies reclaim the excess.
     pub fn refresh_size(&self, id: &crate::core::resource::ResourceId) -> Result<u64> {
         let shared = self.shared();
         let meta = match shared.registry.get(id) {

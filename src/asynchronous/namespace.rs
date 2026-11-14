@@ -330,6 +330,10 @@ impl AsyncNamespace {
     /// Returns the size that is now recorded. Memory-backed resources
     /// report the size recorded at creation. Filesystem stats go through
     /// the blocking pool under Tokio.
+    ///
+    /// Like the sync version, this is observational, not enforcement: a
+    /// resource that outgrew its quota still re-stats successfully; quota
+    /// consequences arrive through the next cleanup pass.
     pub async fn refresh_size(&self, id: &ResourceId) -> Result<u64> {
         let inner = Arc::clone(&self.inner);
         let id = id.clone();
