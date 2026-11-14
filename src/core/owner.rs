@@ -28,9 +28,9 @@
 
 use std::path::Path;
 
-use crate::core::error::Result;
 #[cfg(unix)]
 use crate::core::error::ConfigError;
+use crate::core::error::Result;
 
 /// Verify that `dir`, if it exists, is owned by the current user.
 ///
